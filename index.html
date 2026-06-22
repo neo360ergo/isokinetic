@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>360 Isokinetic Platform</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d0f14; color: #e8eaf0; font-family: Inter, sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    // ── CONFIG ────────────────────────────────────────────────────────────────
+    const SUPABASE_URL = "https://kzaylmwfjpeshavyjmbk.supabase.co";
+    const SUPABASE_KEY = "sb_publishable_zW9G6d6URqVIUu0aBGBIBA_U1mF_ouL";
+    const WORKER_URL   = "https://isokinetic.neoph-ioannou.workers.dev";
+    const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    // ── PALETTE ───────────────────────────────────────────────────────────────
+    const C = {
+      bg:"#0d0f14", bg2:"#13161e", bg3:"#1a1e28",
+      border:"#252a38", text:"#e8eaf0", muted:"#6b7390",
+      accent:"#4f8ef7", green:"#3ecf8e", yellow:"#f5c842",
+      red:"#f25f5c", orange:"#f79d4f",
+    };
+
+    const css = `
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{background:#0d0f14;color:#e8eaf0;font-family:'Inter',sans-serif;font-size:14px;min-height:100vh}
+      input,select,textarea{background:#1a1e28;border:1px solid #252a38;color:#e8eaf0;border-radius:6px;padding:8px 12px;font-size:13px;font-family:'Inter',sans-serif;width:100%;outline:none}
+      input:focus,select:focus,textarea:focus{border-color:#4f8ef7}
+      button{cursor:pointer;font-family:'Inter',sans-serif;border:none;border-radius:6px;font-size:13px;font-weight:500;transition:all 0.15s}
+      table{width:100%;border-collapse:collapse}
+      th{font-size:10px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#6b7390;padding:7px 10px;text-align:left;border-bottom:1px solid #252a38}
+      td{padding:8px 10px;font-size:13px;border-bottom:1px solid rgba(37,42,56,0.5)}
+      tr:last-child td{border-bottom:none}
+      tr:hover td{background:rgba(79,142,247,0.04)}
+      ::-webkit-scrollbar{width:6px;height:6px}
+      ::-webkit-scrollbar-track{background:#13161e}
+      ::-webkit-scrollbar-thumb{background:#252a38;border-radius:3px}
+      .mono{font-family:'JetBrains Mono',monospace}
+      .green{color:#3ecf8e} .yellow{color:#f5c842} .red{color:#f25f5c} .muted{color:#6b7390} .accent{color:#4f8ef7}
+      @keyframes spin{to{transform:rotate(360deg)}}
+      @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+      .fade-in{animation:fadeIn 0.2s ease}
+      @media print{
+        .no-print{display:none!important}
+        body{background:white;color:black}
+        .print-card{background:white!important;border:1px solid #ddd!important}
+      }
+    `;
+
+    // ── HELPERS ───────────────────────────────────────────────────────────────
+    const cov_color     = (v) => v==null?"muted":v<0.15?"green":v<0.25?"yellow":"red";
+    const lsi_color     = (v) => v==null?"muted":v>=90?"green":v>=80?"yellow":"red";
+    const hq_color      = (v) => v==null?"muted":v>=55?"green":v>=45?"yellow":"red";
+    const deficit_color = (v) => v==null?"muted":Math.abs(v)<=10?"green":Math.abs(v)<=20?"yellow":"red";
+
+    const calcLSI    = (r,l) => (!r||!l)?null:Math.round((Math.min(r,l)/Math.max(r,l))*100);
+    const calcHQ     = (f,e) => (!f||!e)?null:Math.round((f/e)*100);
+    const calcDeficit= (r,l) => (!r||!l)?null:Math.round(((l-r)/l)*100);
+
+    function Val({v,cls,unit=""}) {
+      return <span className={`mono ${cls}`}>{v!=null?`${v}${unit}`:"—"}</span>;
+    }
+    function Badge({txt,color}) {
+      const bg={green:"rgba(62,207,142,0.12)",yellow:"rgba(245,200,66,0.12)",red:"rgba(242,95,92,0.12)",muted:"rgba(107,115,144,0.12)"};
+      const tc={green:C.green,yellow:C.yellow,red:C.red,muted:C.muted};
+      return <span style={{background:bg[color]||bg.muted,color:tc[color]||tc.muted,padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:600,fontFamily:"monospace"}}>{txt}</span>;
+    }
+    function Card({children,style={}}) {
+      return <div className="print-card" style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 20px",...style}}>{children}</div>;
+    }
+    function SectionTitle({children}) {
+      return (
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,paddingBottom:8,borderBottom:`1px solid ${C.border}`}}>
+          <div style={{width:3,height:14,background:C.accent,borderRadius:2}}/>
+          <span style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:C.muted}}>{children}</span>
+        </div>
+      );
+    }
+    function Spinner() {
+      return <div style={{width:18,height:18,border:`2px solid ${C.border}`,borderTop:`2px solid ${C.accent}`,borderRadius:"50%",animation:"spin 0.7s linear infinite",display:"inline-block"}}/>;
+    }
+    function Toast({msg,type}) {
+      if(!msg) return null;
+      const bg=type==="error"?"rgba(242,95,92,0.15)":"rgba(62,207,142,0.15)";
+      const bc=type==="error"?C.red:C.green;
+      return <div style={{position:"fixed",bottom:24,right:24,background:bg,border:`1px solid ${bc}`,borderRadius:8,padding:"12px 20px",color:type==="error"?C.red:C.green,fontWeight:500,zIndex:9999,maxWidth:360}}>{msg}</div>;
+    }
+
+    // ── ANALYSIS ENGINE ───────────────────────────────────────────────────────
+    function analyzeResults(results) {
+      const r  = results.find(x=>x.side==="right"&&x.muscle_group==="extensors");
+      const l  = results.find(x=>x.side==="left" &&x.muscle_group==="extensors");
+      const rf = results.find(x=>x.side==="right"&&x.muscle_group==="flexors");
+      const lf = results.find(x=>x.side==="left" &&x.muscle_group==="flexors");
+      const flags=[];
+      const lsi_ext =calcLSI(r?.peak_torque,l?.peak_torque);
+      const lsi_flex=calcLSI(rf?.peak_torque,lf?.peak_torque);
+      const lsi_work=calcLSI(r?.work_per_rep,l?.work_per_rep);
+      const lsi_pwr =calcLSI(r?.avg_power,l?.avg_power);
+      const hq_r=calcHQ(rf?.peak_torque,r?.peak_torque);
+      const hq_l=calcHQ(lf?.peak_torque,l?.peak_torque);
+      [r,l,rf,lf].forEach(x=>{
+        if(!x) return;
+        const side=x.side==="right"?"Δεξί":"Αριστερό";
+        const grp=x.muscle_group==="extensors"?"Εκτ.":"Κάμπτ.";
+        if(x.pt_cov>0.25)      flags.push({type:"red",   msg:`CoV Peak Torque ${side} ${grp}: ${x.pt_cov} — Μη αξιόπιστο`});
+        else if(x.pt_cov>0.15) flags.push({type:"yellow",msg:`CoV Peak Torque ${side} ${grp}: ${x.pt_cov} — Μέτρια μεταβλητότητα`});
+        if(x.rom_cov>0.30)     flags.push({type:"yellow",msg:`CoV ROM ${side} ${grp}: ${x.rom_cov} — Ασταθής αρχική θέση`});
+      });
+      if(lsi_ext !=null&&lsi_ext <90) flags.push({type:lsi_ext <80?"red":"yellow",msg:`LSI Εκτεινόντων: ${lsi_ext}% — κατώφλι RTS 90%`});
+      if(lsi_flex!=null&&lsi_flex<90) flags.push({type:lsi_flex<80?"red":"yellow",msg:`LSI Καμπτόντων: ${lsi_flex}% — κατώφλι RTS 90%`});
+      if(lsi_work!=null&&lsi_work<90) flags.push({type:lsi_work<80?"red":"yellow",msg:`LSI Work Εκτ.: ${lsi_work}% — ασύμμετρη αντοχή`});
+      if(hq_r!=null&&hq_r<50)      flags.push({type:"red",   msg:`H/Q Δεξί: ${hq_r}% — Κρίσιμα χαμηλό (φυσιολ. 55-65%)`});
+      else if(hq_r!=null&&hq_r<55) flags.push({type:"yellow",msg:`H/Q Δεξί: ${hq_r}% — Οριακά χαμηλό`});
+      if(hq_l!=null&&hq_l<50)      flags.push({type:"red",   msg:`H/Q Αριστερό: ${hq_l}% — Κρίσιμα χαμηλό`});
+      else if(hq_l!=null&&hq_l<55) flags.push({type:"yellow",msg:`H/Q Αριστερό: ${hq_l}% — Οριακά χαμηλό`});
+      return {lsi_ext,lsi_flex,lsi_work,lsi_pwr,hq_r,hq_l,flags,r,l,rf,lf};
+    }
+
+    // ── PDF PARSER ────────────────────────────────────────────────────────────
+    async function parsePdfWithClaude(base64) {
+      const prompt = `Extract ALL isokinetic data from this Cybex HUMAC NORM report. Return ONLY valid JSON, no markdown, no explanation.
+{"athlete_name":"string","athlete_id":"string","test_date":"YYYY-MM-DD","joint":"knee|shoulder|trunk|elbow|ankle","protocol":"con_con|con_ecc|ecc_con|isometric|isotonic","speed_deg_s":number,"reps":number,"gravity_corrected":true,"results":[{"side":"right|left","muscle_group":"extensors|flexors|internal_rot|external_rot|abductors|adductors","peak_torque":number,"pt_cov":number,"pt_bw":number,"work_per_rep":number,"work_cov":number,"work_bw":number,"avg_power":number,"power_cov":number,"power_bw":number,"joint_angle_peak":number,"joint_angle_cov":number,"rom":number,"rom_cov":number,"time_to_peak":number,"time_to_peak_cov":number,"time_peak_held":number,"force_decay":number,"reciprocal_delay":number,"delay_time":number}]}`;
+      const resp = await fetch(WORKER_URL, {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({messages:[{role:"user",content:[
+          {type:"document",source:{type:"base64",media_type:"application/pdf",data:base64}},
+          {type:"text",text:prompt}
+        ]}]})
+      });
+      const data = await resp.json();
+      const text = data.content?.find(b=>b.type==="text")?.text||"";
+      const clean = text.replace(/```json|```/g,"").trim();
+      return JSON.parse(clean);
+    }
+
+    // ── ATHLETE LIST ──────────────────────────────────────────────────────────
+    function AthleteList({onSelect,onNew}) {
+      const [athletes,setAthletes]=useState([]);
+      const [search,setSearch]=useState("");
+      const [loading,setLoading]=useState(true);
+      useEffect(()=>{
+        db.from("athletes").select("*").order("name").then(({data})=>{setAthletes(data||[]);setLoading(false);});
+      },[]);
+      const filtered=athletes.filter(a=>a.name.toLowerCase().includes(search.toLowerCase())||a.sport?.toLowerCase().includes(search.toLowerCase()));
+      return (
+        <div className="fade-in">
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+            <div>
+              <div style={{fontSize:11,color:C.accent,fontWeight:600,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>Βάση Δεδομένων</div>
+              <div style={{fontSize:22,fontWeight:700}}>Αθλητές</div>
+            </div>
+            <button onClick={onNew} style={{background:C.accent,color:"white",padding:"9px 18px"}}>+ Νέος Αθλητής</button>
+          </div>
+          <input placeholder="Αναζήτηση αθλητή ή αθλήματος..." value={search} onChange={e=>setSearch(e.target.value)} style={{marginBottom:16}}/>
+          {loading ? <div style={{textAlign:"center",padding:40}}><Spinner/></div>
+          : filtered.length===0 ? (
+            <Card style={{textAlign:"center",padding:40,color:C.muted}}>
+              <div style={{fontSize:32,marginBottom:12}}>👤</div>
+              <div>Δεν βρέθηκαν αθλητές. Πρόσθεσε τον πρώτο!</div>
+            </Card>
+          ) : (
+            <Card style={{padding:0}}>
+              <table>
+                <thead><tr><th>Όνομα</th><th>Ημ. Γέννησης</th><th>Φύλο</th><th>Άθλημα</th><th></th></tr></thead>
+                <tbody>
+                  {filtered.map(a=>(
+                    <tr key={a.id} style={{cursor:"pointer"}} onClick={()=>onSelect(a)}>
+                      <td style={{fontWeight:600}}>{a.name}</td>
+                      <td className="muted">{a.dob||"—"}</td>
+                      <td className="muted">{a.gender==="male"?"Άνδρας":a.gender==="female"?"Γυναίκα":"—"}</td>
+                      <td className="muted">{a.sport||"—"}</td>
+                      <td style={{color:C.accent,fontSize:16}}>›</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+          )}
+        </div>
+      );
+    }
+
+    // ── ATHLETE FORM ──────────────────────────────────────────────────────────
+    function AthleteForm({athlete,onSave,onCancel}) {
+      const [form,setForm]=useState(athlete||{name:"",dob:"",gender:"",weight_kg:"",height_cm:"",sport:"",notes:""});
+      const [saving,setSaving]=useState(false);
+      const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+      const save=async()=>{
+        if(!form.name) return;
+        setSaving(true);
+        const payload={...form,weight_kg:+form.weight_kg||null,height_cm:+form.height_cm||null};
+        if(athlete?.id){
+          await db.from("athletes").update(payload).eq("id",athlete.id);
+          onSave({...athlete,...payload});
+        } else {
+          const {data}=await db.from("athletes").insert(payload).select().single();
+          onSave(data);
+        }
+        setSaving(false);
+      };
+      const lbl=(t)=><div style={{fontSize:11,color:C.muted,fontWeight:600,marginBottom:4}}>{t}</div>;
+      return (
+        <div className="fade-in">
+          <div style={{marginBottom:20}}>
+            <div style={{fontSize:11,color:C.accent,fontWeight:600,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>{athlete?"Επεξεργασία":"Νέος Αθλητής"}</div>
+            <div style={{fontSize:22,fontWeight:700}}>{form.name||"Αθλητής"}</div>
+          </div>
+          <Card>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              <div style={{gridColumn:"1/-1"}}>{lbl("Ονοματεπώνυμο *")}<input value={form.name} onChange={e=>set("name",e.target.value)} placeholder="π.χ. Παπαδόπουλος Γιώργος"/></div>
+              <div>{lbl("Ημ. Γέννησης")}<input type="date" value={form.dob} onChange={e=>set("dob",e.target.value)}/></div>
+              <div>{lbl("Φύλο")}<select value={form.gender} onChange={e=>set("gender",e.target.value)}><option value="">—</option><option value="male">Άνδρας</option><option value="female">Γυναίκα</option></select></div>
+              <div>{lbl("Βάρος (kg)")}<input type="number" value={form.weight_kg} onChange={e=>set("weight_kg",e.target.value)} placeholder="75"/></div>
+              <div>{lbl("Ύψος (cm)")}<input type="number" value={form.height_cm} onChange={e=>set("height_cm",e.target.value)} placeholder="175"/></div>
+              <div style={{gridColumn:"1/-1"}}>{lbl("Άθλημα")}<input value={form.sport} onChange={e=>set("sport",e.target.value)} placeholder="π.χ. Ποδόσφαιρο"/></div>
+              <div style={{gridColumn:"1/-1"}}>{lbl("Σημειώσεις")}<textarea value={form.notes} onChange={e=>set("notes",e.target.value)} rows={2} placeholder="Ιστορικό τραυματισμών..."/></div>
+            </div>
+            <div style={{display:"flex",gap:10,marginTop:16}}>
+              <button onClick={save} disabled={saving} style={{background:C.accent,color:"white",padding:"9px 20px",opacity:saving?0.6:1}}>{saving?<Spinner/>:"Αποθήκευση"}</button>
+              <button onClick={onCancel} style={{background:C.bg3,color:C.muted,padding:"9px 20px"}}>Ακύρωση</button>
+            </div>
+          </Card>
+        </div>
+      );
+    }
+
+    // ── PARSED PREVIEW ────────────────────────────────────────────────────────
+    function ParsedPreview({data}) {
+      return (
+        <Card style={{background:C.bg3}}>
+          <table>
+            <thead><tr><th>Ομάδα</th><th>Πλευρά</th><th>Peak Torque</th><th>CoV PT</th><th>%BW</th><th>Work</th><th>Power</th></tr></thead>
+            <tbody>
+              {data.results?.map((r,i)=>(
+                <tr key={i}>
+                  <td style={{textTransform:"capitalize"}}>{r.muscle_group}</td>
+                  <td className="muted">{r.side==="right"?"Δεξί":"Αριστ."}</td>
+                  <td className={`mono ${r.pt_cov>0.25?"red":r.pt_cov>0.15?"yellow":"green"}`}>{r.peak_torque} Nm</td>
+                  <td><Badge txt={r.pt_cov} color={cov_color(r.pt_cov)}/></td>
+                  <td className="muted mono">{r.pt_bw}%</td>
+                  <td className="mono">{r.work_per_rep} Nm</td>
+                  <td className="mono">{r.avg_power} W</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      );
+    }
+
+    // ── MANUAL ENTRY ──────────────────────────────────────────────────────────
+    function ManualEntry({meta,onSave,onCancel,saving}) {
+      const sides=["right","left"];
+      const groups=meta.joint==="knee"?["extensors","flexors"]:meta.joint==="shoulder"?["flexors","extensors","internal_rot","external_rot","abductors","adductors"]:["extensors","flexors"];
+      const empty=()=>({peak_torque:"",pt_cov:"",pt_bw:"",work_per_rep:"",work_cov:"",work_bw:"",avg_power:"",power_cov:"",power_bw:"",joint_angle_peak:"",rom:"",rom_cov:"",time_to_peak:"",force_decay:""});
+      const [rows,setRows]=useState(()=>sides.flatMap(s=>groups.map(g=>({side:s,muscle_group:g,...empty()}))));
+      const lbl=(t)=><div style={{fontSize:10,color:C.muted,fontWeight:600,marginBottom:2}}>{t}</div>;
+      const setVal=(i,k,v)=>setRows(r=>r.map((row,idx)=>idx===i?{...row,[k]:v}:row));
+      const toNum=v=>v===""?null:+v;
+      const submit=()=>{
+        const results=rows.map(r=>({...r,peak_torque:toNum(r.peak_torque),pt_cov:toNum(r.pt_cov),pt_bw:toNum(r.pt_bw),work_per_rep:toNum(r.work_per_rep),work_cov:toNum(r.work_cov),work_bw:toNum(r.work_bw),avg_power:toNum(r.avg_power),power_cov:toNum(r.power_cov),power_bw:toNum(r.power_bw),joint_angle_peak:toNum(r.joint_angle_peak),rom:toNum(r.rom),rom_cov:toNum(r.rom_cov),time_to_peak:toNum(r.time_to_peak),force_decay:toNum(r.force_decay)}));
+        onSave(results);
+      };
+      return (
+        <div>
+          {rows.map((row,i)=>(
+            <Card key={i} style={{marginBottom:12}}>
+              <div style={{fontSize:12,fontWeight:600,color:C.accent,marginBottom:12,textTransform:"uppercase"}}>{row.side==="right"?"🔴 Δεξί":"🔵 Αριστερό"} — {row.muscle_group}</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8}}>
+                {[["peak_torque","Peak Torque (Nm)"],["pt_cov","CoV PT"],["pt_bw","%BW"],["work_per_rep","Work (Nm)"],["work_cov","CoV Work"],["avg_power","Power (W)"],["power_cov","CoV Power"],["joint_angle_peak","Angle @ Peak (°)"],["rom","ROM (°)"],["rom_cov","CoV ROM"],["time_to_peak","Time to Peak (s)"],["force_decay","Force Decay (s)"]].map(([k,l])=>(
+                  <div key={k}>{lbl(l)}<input type="number" step="0.01" value={row[k]} onChange={e=>setVal(i,k,e.target.value)} placeholder="—"/></div>
+                ))}
+              </div>
+            </Card>
+          ))}
+          <div style={{display:"flex",gap:10,marginTop:8}}>
+            <button onClick={submit} disabled={saving} style={{background:C.green,color:"#0d0f14",padding:"9px 20px",fontWeight:600}}>{saving?<Spinner/>:"Αποθήκευση"}</button>
+            <button onClick={onCancel} style={{background:C.bg3,color:C.muted,padding:"9px 20px"}}>Ακύρωση</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ── MEASUREMENT INPUT ─────────────────────────────────────────────────────
+    function MeasurementInput({athlete,onSave,onCancel}) {
+      const [mode,setMode]=useState("upload");
+      const [parsing,setParsing]=useState(false);
+      const [parsed,setParsed]=useState(null);
+      const [saving,setSaving]=useState(false);
+      const [error,setError]=useState("");
+      const [meta,setMeta]=useState({test_date:new Date().toISOString().split("T")[0],joint:"knee",protocol:"con_con",speed_deg_s:60,reps:5,gravity_corrected:true,notes:""});
+      const joints=["knee","shoulder","trunk","elbow","ankle"];
+      const protocols=["con_con","con_ecc","ecc_con","isometric","isotonic"];
+      const lbl=(t)=><div style={{fontSize:11,color:C.muted,fontWeight:600,marginBottom:4}}>{t}</div>;
+
+      const handleFile=async(e)=>{
+        const file=e.target.files[0]; if(!file) return;
+        setParsing(true); setError("");
+        try {
+          const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(file);});
+          const data=await parsePdfWithClaude(b64);
+          setParsed(data);
+          setMeta(m=>({...m,test_date:data.test_date||m.test_date,joint:data.joint||m.joint,protocol:data.protocol||m.protocol,speed_deg_s:data.speed_deg_s||m.speed_deg_s,reps:data.reps||m.reps}));
+        } catch(err) { setError("Σφάλμα ανάλυσης PDF: "+err.message); }
+        setParsing(false);
+      };
+
+      const saveMeasurement=async(results)=>{
+        setSaving(true);
+        const {data:meas,error:merr}=await db.from("measurements").insert({athlete_id:athlete.id,...meta,speed_deg_s:+meta.speed_deg_s,reps:+meta.reps,raw_json:parsed||null,source:mode==="upload"?"pdf_upload":"manual"}).select().single();
+        if(merr){setError(merr.message);setSaving(false);return;}
+        await db.from("test_results").insert(results.map(r=>({measurement_id:meas.id,...r})));
+        setSaving(false); onSave(meas);
+      };
+
+      return (
+        <div className="fade-in">
+          <div style={{marginBottom:20}}>
+            <div style={{fontSize:11,color:C.accent,fontWeight:600,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>Νέα Μέτρηση</div>
+            <div style={{fontSize:22,fontWeight:700}}>{athlete.name}</div>
+          </div>
+          <div style={{display:"flex",gap:8,marginBottom:20}}>
+            {["upload","manual"].map(m=>(
+              <button key={m} onClick={()=>setMode(m)} style={{padding:"8px 18px",background:mode===m?C.accent:C.bg3,color:mode===m?"white":C.muted,border:`1px solid ${mode===m?C.accent:C.border}`}}>
+                {m==="upload"?"📄 Upload PDF":"✏️ Χειροκίνητη Εισαγωγή"}
+              </button>
+            ))}
+          </div>
+          <Card style={{marginBottom:16}}>
+            <SectionTitle>Στοιχεία Μέτρησης</SectionTitle>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+              <div>{lbl("Ημερομηνία")}<input type="date" value={meta.test_date} onChange={e=>setMeta(m=>({...m,test_date:e.target.value}))}/></div>
+              <div>{lbl("Άρθρωση")}<select value={meta.joint} onChange={e=>setMeta(m=>({...m,joint:e.target.value}))}>{joints.map(j=><option key={j} value={j}>{j}</option>)}</select></div>
+              <div>{lbl("Πρωτόκολλο")}<select value={meta.protocol} onChange={e=>setMeta(m=>({...m,protocol:e.target.value}))}>{protocols.map(p=><option key={p} value={p}>{p}</option>)}</select></div>
+              <div>{lbl("Ταχύτητα (°/s)")}<input type="number" value={meta.speed_deg_s} onChange={e=>setMeta(m=>({...m,speed_deg_s:e.target.value}))}/></div>
+              <div>{lbl("Επαναλήψεις")}<input type="number" value={meta.reps} onChange={e=>setMeta(m=>({...m,reps:e.target.value}))}/></div>
+              <div style={{display:"flex",alignItems:"center",gap:8,paddingTop:18}}>
+                <input type="checkbox" checked={meta.gravity_corrected} onChange={e=>setMeta(m=>({...m,gravity_corrected:e.target.checked}))} style={{width:"auto"}}/>
+                <span style={{fontSize:12,color:C.muted}}>Gravity Correction</span>
+              </div>
+              <div style={{gridColumn:"1/-1"}}>{lbl("Σημειώσεις")}<input value={meta.notes} onChange={e=>setMeta(m=>({...m,notes:e.target.value}))} placeholder="π.χ. Post ACL-R 6 μήνες"/></div>
+            </div>
+          </Card>
+          {mode==="upload" ? (
+            <Card>
+              <SectionTitle>Ανέβασμα PDF Cybex HUMAC</SectionTitle>
+              {!parsed ? (
+                <div>
+                  <label style={{display:"block",border:`2px dashed ${C.border}`,borderRadius:8,padding:32,textAlign:"center",cursor:"pointer",color:C.muted}}>
+                    {parsing?<><Spinner/><div style={{marginTop:8}}>Ανάλυση PDF με AI...</div></>:<><div style={{fontSize:32}}>📄</div><div style={{marginTop:8}}>Κλικ για επιλογή PDF</div><div style={{fontSize:11,marginTop:4}}>Cybex HUMAC NORM report</div></>}
+                    <input type="file" accept=".pdf" onChange={handleFile} style={{display:"none"}}/>
+                  </label>
+                  {error&&<div style={{color:C.red,marginTop:8,fontSize:12}}>{error}</div>}
+                </div>
+              ) : (
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16,color:C.green}}>
+                    <span>✅</span><span style={{fontWeight:600}}>PDF αναλύθηκε — {parsed.results?.length} αποτελέσματα</span>
+                  </div>
+                  <ParsedPreview data={parsed}/>
+                  <div style={{display:"flex",gap:10,marginTop:16}}>
+                    <button onClick={()=>saveMeasurement(parsed.results)} disabled={saving} style={{background:C.green,color:"#0d0f14",padding:"9px 20px",fontWeight:600}}>{saving?<Spinner/>:"Αποθήκευση"}</button>
+                    <button onClick={()=>setParsed(null)} style={{background:C.bg3,color:C.muted,padding:"9px 20px"}}>Νέο PDF</button>
+                    <button onClick={onCancel} style={{background:C.bg3,color:C.muted,padding:"9px 20px"}}>Ακύρωση</button>
+                  </div>
+                </div>
+              )}
+            </Card>
+          ) : (
+            <ManualEntry meta={meta} onSave={saveMeasurement} onCancel={onCancel} saving={saving}/>
+          )}
+        </div>
+      );
+    }
+
+    // ── ANALYSIS VIEW ─────────────────────────────────────────────────────────
+    function AnalysisView({measurements,selected}) {
+      const meas=measurements.find(m=>selected.includes(m.id))||measurements[0];
+      if(!meas) return <div style={{color:C.muted}}>Επίλεξε μέτρηση από το Ιστορικό.</div>;
+      const results=meas.test_results||[];
+      const an=analyzeResults(results);
+      const {lsi_ext,lsi_flex,lsi_work,lsi_pwr,hq_r,hq_l,flags,r,l,rf,lf}=an;
+      return (
+        <div className="fade-in">
+          {flags.length>0&&<div style={{marginBottom:16}}>{flags.map((f,i)=>(
+            <div key={i} style={{background:f.type==="red"?"rgba(242,95,92,0.08)":"rgba(245,200,66,0.08)",border:`1px solid ${f.type==="red"?C.red:C.yellow}`,borderRadius:8,padding:"8px 14px",marginBottom:6,color:f.type==="red"?C.red:C.yellow,fontSize:12,fontWeight:500}}>⚠ {f.msg}</div>
+          ))}</div>}
+          <SectionTitle>Limb Symmetry Index & H/Q</SectionTitle>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:20}}>
+            {[["LSI Peak Torque Εκτ.",lsi_ext,"≥90%",false],["LSI Peak Torque Κάμπτ.",lsi_flex,"≥90%",false],["LSI Work Εκτ.",lsi_work,"≥90%",false],["LSI Power Εκτ.",lsi_pwr,"≥90%",false],["H/Q Δεξί",hq_r,"55-65%",true],["H/Q Αριστερό",hq_l,"55-65%",true]].map(([lbl,val,norm,isHQ])=>(
+              <Card key={lbl} style={{textAlign:"center"}}>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>{lbl}</div>
+                <div className={`mono ${isHQ?hq_color(val):lsi_color(val)}`} style={{fontSize:26,fontWeight:700}}>{val!=null?`${val}%`:"—"}</div>
+                <div style={{fontSize:10,color:C.muted,marginTop:4}}>Φυσιολ. {norm}</div>
+              </Card>
+            ))}
+          </div>
+          <SectionTitle>Αναλυτικά Αποτελέσματα</SectionTitle>
+          <Card style={{padding:0,marginBottom:16}}>
+            <table>
+              <thead><tr><th>Παράμετρος</th><th>Δεξί Εκτ.</th><th>Αριστ. Εκτ.</th><th>Deficit</th><th>Δεξί Κάμπτ.</th><th>Αριστ. Κάμπτ.</th><th>Deficit</th></tr></thead>
+              <tbody>
+                {[["Peak Torque (Nm)","peak_torque",""],["CoV PT","pt_cov",""],["% BW","pt_bw","%"],["Work/Rep (Nm)","work_per_rep",""],["CoV Work","work_cov",""],["Avg Power (W)","avg_power",""],["Angle @ Peak (°)","joint_angle_peak","°"],["ROM (°)","rom","°"],["CoV ROM","rom_cov",""],["Time to Peak (s)","time_to_peak","s"],["Force Decay (s)","force_decay","s"]].map(([lbl,key,unit])=>{
+                  const de=calcDeficit(r?.[key],l?.[key]);
+                  const df=calcDeficit(rf?.[key],lf?.[key]);
+                  const isCov=key.includes("cov");
+                  return (
+                    <tr key={key}>
+                      <td className="muted" style={{fontSize:12}}>{lbl}</td>
+                      <td><Val v={r?.[key]} cls={isCov?cov_color(r?.[key]):""} unit={unit}/></td>
+                      <td><Val v={l?.[key]} cls={isCov?cov_color(l?.[key]):""} unit={unit}/></td>
+                      <td>{de!=null&&<Badge txt={`${de>0?"+":""}${de}%`} color={deficit_color(de)}/>}</td>
+                      <td><Val v={rf?.[key]} cls={isCov?cov_color(rf?.[key]):""} unit={unit}/></td>
+                      <td><Val v={lf?.[key]} cls={isCov?cov_color(lf?.[key]):""} unit={unit}/></td>
+                      <td>{df!=null&&<Badge txt={`${df>0?"+":""}${df}%`} color={deficit_color(df)}/>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </Card>
+          <button onClick={()=>window.print()} className="no-print" style={{background:C.bg3,color:C.muted,padding:"8px 18px",border:`1px solid ${C.border}`}}>🖨 Εκτύπωση / PDF</button>
+        </div>
+      );
+    }
+
+    // ── COMPARE VIEW ──────────────────────────────────────────────────────────
+    function CompareView({measurements}) {
+      const [t1id,setT1id]=useState(measurements[1]?.id||"");
+      const [t2id,setT2id]=useState(measurements[0]?.id||"");
+      const t1=measurements.find(m=>m.id===t1id);
+      const t2=measurements.find(m=>m.id===t2id);
+      if(measurements.length<2) return <Card style={{textAlign:"center",padding:40,color:C.muted}}><div style={{fontSize:32,marginBottom:12}}>📈</div><div>Χρειάζονται τουλάχιστον 2 μετρήσεις.</div></Card>;
+      const getVal=(m,side,grp,key)=>m?.test_results?.find(r=>r.side===side&&r.muscle_group===grp)?.[key];
+      const delta=(v1,v2)=>(v1!=null&&v2!=null)?Math.round(((v2-v1)/Math.abs(v1))*100):null;
+      const rows=[
+        {lbl:"Peak Torque Εκτ. Δεξί (Nm)",side:"right",grp:"extensors",key:"peak_torque"},
+        {lbl:"Peak Torque Εκτ. Αριστ. (Nm)",side:"left",grp:"extensors",key:"peak_torque"},
+        {lbl:"Peak Torque Κάμπτ. Δεξί (Nm)",side:"right",grp:"flexors",key:"peak_torque"},
+        {lbl:"Peak Torque Κάμπτ. Αριστ. (Nm)",side:"left",grp:"flexors",key:"peak_torque"},
+        {lbl:"Work Εκτ. Δεξί (Nm)",side:"right",grp:"extensors",key:"work_per_rep"},
+        {lbl:"Power Εκτ. Δεξί (W)",side:"right",grp:"extensors",key:"avg_power"},
+      ];
+      const an1=analyzeResults(t1?.test_results||[]);
+      const an2=analyzeResults(t2?.test_results||[]);
+      return (
+        <div className="fade-in">
+          <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:16,marginBottom:20,alignItems:"center"}}>
+            <div><div style={{fontSize:11,color:C.muted,fontWeight:600,marginBottom:4}}>ΜΕΤΡΗΣΗ 1 (Βάση)</div>
+              <select value={t1id} onChange={e=>setT1id(e.target.value)}>{measurements.map(m=><option key={m.id} value={m.id}>{m.test_date} — {m.notes||m.protocol}</option>)}</select></div>
+            <div style={{color:C.border,fontSize:20,textAlign:"center"}}>→</div>
+            <div><div style={{fontSize:11,color:C.muted,fontWeight:600,marginBottom:4}}>ΜΕΤΡΗΣΗ 2 (Νεότερη)</div>
+              <select value={t2id} onChange={e=>setT2id(e.target.value)}>{measurements.map(m=><option key={m.id} value={m.id}>{m.test_date} — {m.notes||m.protocol}</option>)}</select></div>
+          </div>
+          {t1&&t2&&t1.gravity_corrected!==t2.gravity_corrected&&<div style={{background:"rgba(245,200,66,0.08)",border:`1px solid ${C.yellow}`,borderRadius:8,padding:"10px 16px",marginBottom:16,color:C.yellow,fontSize:12}}>⚠ Προσοχή: Διαφορά gravity correction μεταξύ μετρήσεων.</div>}
+          <SectionTitle>Σύγκριση Παραμέτρων</SectionTitle>
+          <Card style={{padding:0,marginBottom:16}}>
+            <table>
+              <thead><tr><th>Παράμετρος</th><th>{t1?.test_date||"T1"}</th><th>{t2?.test_date||"T2"}</th><th>Μεταβολή</th></tr></thead>
+              <tbody>{rows.map(({lbl,side,grp,key})=>{const v1=getVal(t1,side,grp,key);const v2=getVal(t2,side,grp,key);const d=delta(v1,v2);return(<tr key={lbl}><td className="muted" style={{fontSize:12}}>{lbl}</td><td className="mono">{v1??"—"}</td><td className="mono">{v2??"—"}</td><td>{d!=null&&<Badge txt={`${d>0?"+":""}${d}%`} color={d>=0?"green":"red"}/>}</td></tr>);})}</tbody>
+            </table>
+          </Card>
+          <SectionTitle>LSI & H/Q — Εξέλιξη</SectionTitle>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+            {[["LSI PT Εκτ.",an1.lsi_ext,an2.lsi_ext],["LSI PT Κάμπτ.",an1.lsi_flex,an2.lsi_flex],["H/Q Δεξί",an1.hq_r,an2.hq_r],["H/Q Αριστ.",an1.hq_l,an2.hq_l],["LSI Work",an1.lsi_work,an2.lsi_work],["LSI Power",an1.lsi_pwr,an2.lsi_pwr]].map(([lbl,v1,v2])=>{
+              const d=delta(v1,v2);
+              return(<Card key={lbl} style={{textAlign:"center"}}>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>{lbl}</div>
+                <div style={{display:"flex",justifyContent:"center",gap:12,alignItems:"center"}}>
+                  <div className="mono muted" style={{fontSize:14}}>{v1??"—"}%</div>
+                  <div style={{color:C.border}}>→</div>
+                  <div className={`mono ${lsi_color(v2)}`} style={{fontSize:20,fontWeight:700}}>{v2??"—"}%</div>
+                </div>
+                {d!=null&&<div style={{marginTop:6}}><Badge txt={`${d>0?"+":""}${d}%`} color={d>=0?"green":"red"}/></div>}
+              </Card>);
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    // ── MEASUREMENT HISTORY ───────────────────────────────────────────────────
+    function MeasurementHistory({measurements,selected,onToggle,onViewAnalysis}) {
+      if(measurements.length===0) return <Card style={{textAlign:"center",padding:40,color:C.muted}}><div style={{fontSize:32,marginBottom:12}}>📊</div><div>Δεν υπάρχουν μετρήσεις.</div></Card>;
+      return (
+        <div>
+          {selected.length>0&&<div style={{background:"rgba(79,142,247,0.08)",border:`1px solid ${C.accent}`,borderRadius:8,padding:"10px 16px",marginBottom:16,fontSize:12,color:C.accent}}>{selected.length===1?"1 μέτρηση επιλεγμένη":"2 μετρήσεις — πάτα «Σύγκριση»"}</div>}
+          <Card style={{padding:0}}>
+            <table>
+              <thead><tr><th></th><th>Ημερομηνία</th><th>Άρθρωση</th><th>Πρωτόκολλο</th><th>Ταχύτητα</th><th>Gravity</th><th>Πηγή</th><th></th></tr></thead>
+              <tbody>{measurements.map(m=>(
+                <tr key={m.id}>
+                  <td><input type="checkbox" checked={selected.includes(m.id)} onChange={()=>onToggle(m.id)} style={{width:"auto"}}/></td>
+                  <td style={{fontWeight:600}}>{m.test_date}</td>
+                  <td style={{textTransform:"capitalize"}}>{m.joint}</td>
+                  <td><Badge txt={m.protocol} color="muted"/></td>
+                  <td className="mono muted">{m.speed_deg_s}°/s</td>
+                  <td>{m.gravity_corrected?<span className="green">✓</span>:<span className="red">✗</span>}</td>
+                  <td className="muted" style={{fontSize:11}}>{m.source==="pdf_upload"?"PDF":"Manual"}</td>
+                  <td><button onClick={()=>onViewAnalysis(m)} style={{background:C.bg3,color:C.accent,padding:"4px 12px",fontSize:12}}>Ανάλυση →</button></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </Card>
+        </div>
+      );
+    }
+
+    // ── ATHLETE PROFILE ───────────────────────────────────────────────────────
+    function AthleteProfile({athlete,onBack,onNewMeasurement}) {
+      const [measurements,setMeasurements]=useState([]);
+      const [selected,setSelected]=useState([]);
+      const [loading,setLoading]=useState(true);
+      const [view,setView]=useState("history");
+      const load=useCallback(async()=>{
+        setLoading(true);
+        const {data}=await db.from("measurements").select("*, test_results(*)").eq("athlete_id",athlete.id).order("test_date",{ascending:false});
+        setMeasurements(data||[]); setLoading(false);
+      },[athlete.id]);
+      useEffect(()=>{load();},[load]);
+      const toggleSelect=(id)=>setSelected(s=>s.includes(id)?s.filter(x=>x!==id):[...s,id].slice(-2));
+      const age=athlete.dob?Math.floor((new Date()-new Date(athlete.dob))/31557600000):null;
+      return (
+        <div className="fade-in">
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
+            <div>
+              <button onClick={onBack} style={{background:"none",color:C.muted,fontSize:12,padding:"4px 0",marginBottom:8}}>← Πίσω</button>
+              <div style={{fontSize:22,fontWeight:700}}>{athlete.name}</div>
+              <div style={{color:C.muted,fontSize:13,marginTop:2}}>{[age&&`${age} ετών`,athlete.gender==="male"?"Άνδρας":athlete.gender==="female"?"Γυναίκα":null,athlete.weight_kg&&`${athlete.weight_kg}kg`,athlete.height_cm&&`${athlete.height_cm}cm`,athlete.sport].filter(Boolean).join(" · ")}</div>
+              {athlete.notes&&<div style={{fontSize:12,color:C.muted,marginTop:4,fontStyle:"italic"}}>{athlete.notes}</div>}
+            </div>
+            <button onClick={onNewMeasurement} style={{background:C.accent,color:"white",padding:"9px 18px"}}>+ Νέα Μέτρηση</button>
+          </div>
+          <div style={{display:"flex",gap:4,marginBottom:20,borderBottom:`1px solid ${C.border}`}}>
+            {[["history","Ιστορικό"],["analysis","Ανάλυση"],["compare","Σύγκριση"]].map(([v,l])=>(
+              <button key={v} onClick={()=>setView(v)} style={{padding:"8px 18px",background:"none",color:view===v?C.accent:C.muted,borderBottom:view===v?`2px solid ${C.accent}`:"2px solid transparent",borderRadius:0,fontWeight:view===v?600:400}}>{l}</button>
+            ))}
+          </div>
+          {loading?<div style={{textAlign:"center",padding:40}}><Spinner/></div>:(
+            <>
+              {view==="history"&&<MeasurementHistory measurements={measurements} selected={selected} onToggle={toggleSelect} onViewAnalysis={(m)=>{setSelected([m.id]);setView("analysis");}}/>}
+              {view==="analysis"&&<AnalysisView measurements={measurements} selected={selected} athlete={athlete}/>}
+              {view==="compare"&&<CompareView measurements={measurements} athlete={athlete}/>}
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ── MAIN APP ──────────────────────────────────────────────────────────────
+    function App() {
+      const [view,setView]=useState("list");
+      const [selectedAthlete,setSelectedAthlete]=useState(null);
+      const [toast,setToast]=useState(null);
+      const showToast=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),3500);};
+      return (
+        <div style={{minHeight:"100vh",background:C.bg}}>
+          <style>{css}</style>
+          <div className="no-print" style={{background:C.bg2,borderBottom:`1px solid ${C.border}`,padding:"14px 32px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer"}} onClick={()=>setView("list")}>
+              <div style={{width:36,height:36,background:C.accent,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>⚡</div>
+              <div>
+                <div style={{fontWeight:700,fontSize:15}}>360 Ergometric Tests</div>
+                <div style={{fontSize:11,color:C.muted}}>Isokinetic Assessment Platform</div>
+              </div>
+            </div>
+            {selectedAthlete&&view!=="list"&&<div style={{fontSize:12,color:C.muted}}><span style={{cursor:"pointer",color:C.accent}} onClick={()=>setView("list")}>Αθλητές</span>{" › "}<span style={{color:C.text}}>{selectedAthlete.name}</span></div>}
+          </div>
+          <div style={{maxWidth:1100,margin:"0 auto",padding:"28px 32px"}}>
+            {view==="list"&&<AthleteList onSelect={a=>{setSelectedAthlete(a);setView("profile");}} onNew={()=>setView("newAthlete")}/>}
+            {view==="newAthlete"&&<AthleteForm onSave={a=>{setSelectedAthlete(a);showToast("Αθλητής αποθηκεύτηκε");setView("profile");}} onCancel={()=>setView("list")}/>}
+            {view==="profile"&&selectedAthlete&&<AthleteProfile athlete={selectedAthlete} onBack={()=>setView("list")} onNewMeasurement={()=>setView("newMeasurement")}/>}
+            {view==="newMeasurement"&&selectedAthlete&&<MeasurementInput athlete={selectedAthlete} onSave={()=>{showToast("Μέτρηση αποθηκεύτηκε");setView("profile");}} onCancel={()=>setView("profile")}/>}
+          </div>
+          {toast&&<Toast msg={toast.msg} type={toast.type}/>}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  </script>
+</body>
+</html>
