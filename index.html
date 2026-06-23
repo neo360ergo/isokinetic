@@ -1,0 +1,2448 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>360 Isokinetic Platform</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script type="module">
+import { h, render } from 'https://esm.sh/preact@10';
+import { useState, useEffect, useCallback, useRef } from 'https://esm.sh/preact@10/hooks';
+import { html } from 'https://esm.sh/htm/preact';
+
+const SB_URL = "https://kzaylmwfjpeshavyjmbk.supabase.co";
+const SB_KEY = "sb_publishable_zW9G6d6URqVIUu0aBGBIBA_U1mF_ouL";
+const WORKER  = "https://isokinetic.neoph-ioannou.workers.dev";
+
+// ── SUPABASE AUTH ─────────────────────────────────────────────────────────────
+const AUTH_URL = `${SB_URL}/auth/v1`;
+const AH = {"Content-Type":"application/json","apikey":SB_KEY};
+
+const auth = {
+  async signUp({email,password,name,id_number,dob,team_id,sport_id,phone}){
+    const r = await fetch(`${AUTH_URL}/signup`,{method:"POST",headers:AH,body:JSON.stringify({email,password,data:{name,id_number,dob,team_id,sport_id,phone}})});
+    const d = await r.json();
+    if(d.error) throw new Error(d.error.message||d.msg||JSON.stringify(d));
+    return d;
+  },
+  async signIn({email,password}){
+    const r = await fetch(`${AUTH_URL}/token?grant_type=password`,{method:"POST",headers:AH,body:JSON.stringify({email,password})});
+    const d = await r.json();
+    if(d.error) throw new Error(d.error.message||d.msg||JSON.stringify(d));
+    return d;
+  },
+  async signOut(token){
+    await fetch(`${AUTH_URL}/logout`,{method:"POST",headers:{...AH,"Authorization":`Bearer ${token}`}});
+  },
+  async getUser(token){
+    const r = await fetch(`${AUTH_URL}/user`,{headers:{...AH,"Authorization":`Bearer ${token}`}});
+    const d = await r.json();
+    if(d.error) return null;
+    return d;
+  },
+  async refreshToken(refresh_token){
+    const r = await fetch(`${AUTH_URL}/token?grant_type=refresh_token`,{method:"POST",headers:AH,body:JSON.stringify({refresh_token})});
+    const d = await r.json();
+    if(d.error) throw new Error(d.error.message||d.msg);
+    return d;
+  }
+};
+
+// ── SESSION MANAGEMENT ────────────────────────────────────────────────────────
+let _session = null;
+let _appUser = null;
+
+function getSession(){ return _session; }
+function getAppUser(){ return _appUser; }
+function isAdmin(){ return _appUser?.role==="admin"; }
+function isCoach(){ return _appUser?.role==="coach"||isAdmin(); }
+function isTrainer(){ return _appUser?.role==="trainer"||isAdmin(); }
+
+function saveSession(session){
+  _session = session;
+  if(session) localStorage.setItem("iso_session", JSON.stringify(session));
+  else localStorage.removeItem("iso_session");
+}
+
+function loadSession(){
+  try {
+    const s = localStorage.getItem("iso_session");
+    if(s) _session = JSON.parse(s);
+  } catch(e){}
+}
+
+loadSession();
+
+// Override db headers to use auth token when available
+const dbH = () => {
+  const h = {"Content-Type":"application/json","apikey":SB_KEY,"Prefer":"return=representation"};
+  if(_session?.access_token) h["Authorization"] = `Bearer ${_session.access_token}`;
+  else h["Authorization"] = `Bearer ${SB_KEY}`;
+  return h;
+};
+
+const C = {bg:"#0d0f14",bg2:"#13161e",bg3:"#1a1e28",border:"#252a38",text:"#e8eaf0",muted:"#6b7390",accent:"#4f8ef7",green:"#3ecf8e",yellow:"#f5c842",red:"#f25f5c"};
+const H = {"Content-Type":"application/json","apikey":SB_KEY,"Authorization":`Bearer ${SB_KEY}`,"Prefer":"return=representation"};
+
+// ── NORMATIVE DATA ────────────────────────────────────────────────────────────
+const NORMS = {
+  male:   {ext_bw:[200,280],flex_bw:[110,160],hq:[55,70],lsi:90},
+  female: {ext_bw:[150,200],flex_bw:[90,130], hq:[55,70],lsi:90},
+};
+
+// ── i18n ──────────────────────────────────────────────────────────────────────
+const T = {
+  el: {
+    title:"360 Ergometric Tests",subtitle:"Ισοκινητική Αξιολόγηση",
+    athlete:"Αθλητής",dob:"Ημ. Γέννησης",gender:"Φύλο",weight:"Βάρος",height:"Ύψος",sport:"Άθλημα",
+    male:"Άνδρας",female:"Γυναίκα",age:"ετών",
+    date:"Ημερομηνία",joint:"Άρθρωση",protocol:"Πρωτόκολλο",speed:"Ταχύτητα",reps:"Επαναλήψεις",
+    gravity:"Gravity Correction",notes:"Σημειώσεις",source:"Πηγή",
+    peak_torque:"Peak Torque (Nm)",cov_pt:"CoV PT",bw:"%BW",work:"Work/Rep (Nm)",cov_work:"CoV Work",
+    power:"Avg Power (W)",rom:"ROM (°)",cov_rom:"CoV ROM",angle:"Angle@Peak (°)",time_peak:"Time Peak (s)",force_decay:"Force Decay (s)",
+    right_ext:"Δεξί Εκτ.",left_ext:"Αριστ. Εκτ.",right_flex:"Δεξί Κάμπτ.",left_flex:"Αριστ. Κάμπτ.",deficit:"Deficit",
+    lsi_ext:"LSI PT Εκτ.",lsi_flex:"LSI PT Κάμπτ.",lsi_work:"LSI Work",lsi_pwr:"LSI Power",
+    hq_right:"H/Q Δεξί",hq_left:"H/Q Αριστ.",
+    rts_title:"Return to Sport Scorecard",rts_approved:"✅ RTS Εγκεκριμένο",rts_pending:"⚠️ RTS Υπό Αξιολόγηση",rts_denied:"❌ RTS Μη Εγκεκριμένο",
+    rts_criteria:"κριτήρια",norm_title:"Normative Data",
+    flags_title:"Κλινικά Ευρήματα",analysis_title:"Αναλυτικά Αποτελέσματα",
+    print_date:"Ημ. Εκτύπωσης",operator:"Χειριστής",
+    norm_below:"Κάτω από norm",norm_in:"Εντός norm",norm_above:"Άνω από norm",
+  },
+  en: {
+    title:"360 Ergometric Tests",subtitle:"Isokinetic Assessment",
+    athlete:"Athlete",dob:"Date of Birth",gender:"Gender",weight:"Weight",height:"Height",sport:"Sport",
+    male:"Male",female:"Female",age:"years",
+    date:"Date",joint:"Joint",protocol:"Protocol",speed:"Speed",reps:"Repetitions",
+    gravity:"Gravity Correction",notes:"Notes",source:"Source",
+    peak_torque:"Peak Torque (Nm)",cov_pt:"CoV PT",bw:"%BW",work:"Work/Rep (Nm)",cov_work:"CoV Work",
+    power:"Avg Power (W)",rom:"ROM (°)",cov_rom:"CoV ROM",angle:"Angle@Peak (°)",time_peak:"Time Peak (s)",force_decay:"Force Decay (s)",
+    right_ext:"Right Ext.",left_ext:"Left Ext.",right_flex:"Right Flex.",left_flex:"Left Flex.",deficit:"Deficit",
+    lsi_ext:"LSI PT Ext.",lsi_flex:"LSI PT Flex.",lsi_work:"LSI Work",lsi_pwr:"LSI Power",
+    hq_right:"H/Q Right",hq_left:"H/Q Left",
+    rts_title:"Return to Sport Scorecard",rts_approved:"✅ RTS Cleared",rts_pending:"⚠️ RTS Under Evaluation",rts_denied:"❌ RTS Not Cleared",
+    rts_criteria:"criteria",norm_title:"Normative Data",
+    flags_title:"Clinical Findings",analysis_title:"Detailed Results",
+    print_date:"Print Date",operator:"Operator",
+    norm_below:"Below norm",norm_in:"Within norm",norm_above:"Above norm",
+  }
+};
+
+// ── SUPABASE REST ─────────────────────────────────────────────────────────────
+const db = {
+  async get(table,extra=""){const r=await fetch(`${SB_URL}/rest/v1/${table}?select=*${extra}`,{headers:dbH()});if(!r.ok)throw new Error(await r.text());return r.json();},
+  async post(table,body){const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:dbH(),body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());const d=await r.json();return Array.isArray(d)?d[0]:d;},
+  async patch(table,id,body){const r=await fetch(`${SB_URL}/rest/v1/${table}?id=eq.${id}`,{method:"PATCH",headers:dbH(),body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());const d=await r.json();return Array.isArray(d)?d[0]:d;},
+  async del(table,id){const r=await fetch(`${SB_URL}/rest/v1/${table}?id=eq.${id}`,{method:"DELETE",headers:{...dbH(),Prefer:""}});if(!r.ok)throw new Error(await r.text());}
+};
+
+// ── REFERENCE DATA CACHE ──────────────────────────────────────────────────────
+let _sports=[], _teams=[];
+async function loadRefData(){
+  try {
+    _sports = await db.get("sports","&order=name.asc");
+    _teams  = await db.get("teams","&order=name.asc");
+  } catch(e){}
+}
+loadRefData();
+
+// ── AI INTERPRETATION ─────────────────────────────────────────────────────────
+async function generateInterpretation(athlete, meas, an, lang="el") {
+  const {lsi_ext,lsi_flex,lsi_work,lsi_pwr,hq_r,hq_l,flags,r,l,rf,lf} = an;
+  const {passed,total,pct} = rtsScore(an);
+  const gStr = athlete.gender==="male"?"άνδρας":"γυναίκα";
+  const aStr = athlete.dob?Math.floor((new Date()-new Date(athlete.dob))/31557600000)+" ετών":"";
+
+  const prompt = lang==="el" ? `Είσαι έμπειρος αθλητίατρος και φυσιοθεραπευτής. Γράψε κλινική ερμηνεία ισοκινητικής αξιολόγησης στα ΕΛΛΗΝΙΚΑ.
+
+Αθλητής: ${athlete.name}, ${aStr}, ${gStr}
+Άθλημα: ${athlete.sport||"—"}
+Ημερομηνία: ${meas.test_date}
+Άρθρωση: ${meas.joint} | Ταχύτητα: ${meas.speed_deg_s}°/s
+Σημειώσεις εξεταστή: ${meas.notes||"—"}
+
+Αποτελέσματα:
+- LSI Εκτεινόντων: ${lsi_ext??"-"}%
+- LSI Καμπτόντων: ${lsi_flex??"-"}%  
+- LSI Work: ${lsi_work??"-"}%
+- H/Q Δεξί: ${hq_r??"-"}% | H/Q Αριστ.: ${hq_l??"-"}%
+- Peak Torque Εκτ. Δεξί: ${r?.peak_torque??"-"} Nm (${r?.pt_bw??"-"}%BW)
+- Peak Torque Εκτ. Αριστ.: ${l?.peak_torque??"-"} Nm (${l?.pt_bw??"-"}%BW)
+- Peak Torque Κάμπτ. Δεξί: ${rf?.peak_torque??"-"} Nm | Αριστ.: ${lf?.peak_torque??"-"} Nm
+- RTS Score: ${pct}% (${passed}/${total} κριτήρια)
+- Flags: ${flags.map(f=>f.m).join("; ")||"Κανένα"}
+
+Γράψε:
+1. ΚΛΙΝΙΚΗ ΕΡΜΗΝΕΙΑ (2-3 παράγραφοι) — ανάλυση αποτελεσμάτων, κλινική σημασία
+2. ΣΥΣΤΑΣΕΙΣ — συγκεκριμένο πρόγραμμα ασκήσεων (άσκηση, σετ, επαναλήψεις, συχνότητα)
+3. ΣΤΟΧΟΙ ΕΠΟΜΕΝΗΣ ΜΕΤΡΗΣΗΣ — πότε και τι να περιμένουμε
+
+Γράψε επαγγελματικά, εξατομικευμένα, χωρίς γενικόλογα.`
+: `You are an experienced sports physician and physiotherapist. Write a clinical interpretation in ENGLISH.
+
+Athlete: ${athlete.name}, ${aStr}, ${gStr}
+Sport: ${athlete.sport||"—"}
+Date: ${meas.test_date} | Joint: ${meas.joint} | Speed: ${meas.speed_deg_s}°/s
+
+Results:
+- LSI Extensors: ${lsi_ext??"-"}% | LSI Flexors: ${lsi_flex??"-"}%
+- H/Q Right: ${hq_r??"-"}% | H/Q Left: ${hq_l??"-"}%
+- PT Ext Right: ${r?.peak_torque??"-"} Nm (${r?.pt_bw??"-"}%BW)
+- PT Flex Right: ${rf?.peak_torque??"-"} Nm | Left: ${lf?.peak_torque??"-"} Nm
+- RTS Score: ${pct}% (${passed}/${total} criteria)
+- Flags: ${flags.map(f=>f.m).join("; ")||"None"}
+
+Write:
+1. CLINICAL INTERPRETATION (2-3 paragraphs)
+2. RECOMMENDATIONS — specific exercise program (exercise, sets, reps, frequency)
+3. NEXT ASSESSMENT GOALS — when and what to expect`;
+
+  const resp = await fetch(WORKER,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({messages:[{role:"user",content:prompt}]})});
+  const data = await resp.json();
+  return data.content?.find(b=>b.type==="text")?.text||"";
+}
+
+// ── REHAB TEMPLATES ───────────────────────────────────────────────────────────
+function generateRehabTemplate(an, lang="el") {
+  const {lsi_ext,lsi_flex,lsi_work,hq_r,hq_l,flags} = an;
+  const {pct} = rtsScore(an);
+  const lines = [];
+  const isEl = lang==="el";
+
+  if(lsi_flex!=null&&lsi_flex<90) {
+    lines.push(isEl?"## Ενδυνάμωση Ισχιοκνημιαίων":"## Hamstring Strengthening");
+    lines.push(isEl?"- Nordic Curls: 3×6-8 | 2×/εβδ.":"- Nordic Curls: 3×6-8 | 2×/week");
+    lines.push(isEl?"- Romanian Deadlift: 3×8-10 | 70-80% 1RM":"- Romanian Deadlift: 3×8-10 | 70-80% 1RM");
+    lines.push(isEl?"- Leg Curl (εκκεντρικό): 3×10":"- Leg Curl (eccentric): 3×10");
+  }
+  if(lsi_ext!=null&&lsi_ext<90) {
+    lines.push(isEl?"## Ενδυνάμωση Τετρακεφάλου":"## Quadriceps Strengthening");
+    lines.push(isEl?"- Leg Press μονοποδικό: 3×10 | 2×/εβδ.":"- Single-leg Press: 3×10 | 2×/week");
+    lines.push(isEl?"- Split Squat: 3×8-10":"- Split Squat: 3×8-10");
+    lines.push(isEl?"- Step-ups: 3×12":"- Step-ups: 3×12");
+  }
+  if((hq_r!=null&&hq_r<55)||(hq_l!=null&&hq_l<55)) {
+    lines.push(isEl?"## Ισορροπία H/Q Ratio":"## H/Q Ratio Balance");
+    lines.push(isEl?"- Good Mornings: 3×12":"- Good Mornings: 3×12");
+    lines.push(isEl?"- Glute Bridge: 3×15":"- Glute Bridge: 3×15");
+    lines.push(isEl?"- Hip Hinge pattern: καθημερινά":"- Hip Hinge pattern: daily");
+  }
+  if(pct>=85) {
+    lines.push(isEl?"## Αγωνιστική Επιστροφή (RTS)":"## Return to Sport");
+    lines.push(isEl?"- Plyometrics: Drop jumps 3×5 | 2×/εβδ.":"- Plyometrics: Drop jumps 3×5 | 2×/week");
+    lines.push(isEl?"- Reactive strength training":"- Reactive strength training");
+    lines.push(isEl?"- Sport-specific drills":"- Sport-specific drills");
+  }
+  if(lsi_work!=null&&lsi_work<90) {
+    lines.push(isEl?"## Νευρομυϊκή Αντοχή":"## Neuromuscular Endurance");
+    lines.push(isEl?"- Isokinetic fatigue protocol (180°/s × 20 reps)":"- Isokinetic fatigue protocol (180°/s × 20 reps)");
+    lines.push(isEl?"- Circuit training 3×/εβδ.":"- Circuit training 3×/week");
+  }
+  lines.push("");
+  lines.push(isEl?"## Επανέλεγχος":"## Follow-up");
+  lines.push(isEl?`- Επόμενη ισοκινητική αξιολόγηση: 6-8 εβδομάδες`:`- Next isokinetic assessment: 6-8 weeks`);
+  lines.push(isEl?`- Στόχος LSI: ≥90% | H/Q: 55-65%`:`- Target LSI: ≥90% | H/Q: 55-65%`);
+
+  return lines.join("\n");
+}
+
+
+const KNOWN_COLS=new Set(["side","muscle_group","peak_torque","pt_cov","pt_bw","work_per_rep","work_cov","work_bw","avg_power","power_cov","power_bw","joint_angle_peak","joint_angle_cov","rom","rom_cov","time_to_peak","time_to_peak_cov","time_peak_held","time_peak_held_cov","force_decay","force_decay_cov","reciprocal_delay","reciprocal_delay_cov","delay_time","delay_time_cov"]);
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+const cov_c=v=>v==null?"muted":v<0.15?"green":v<0.25?"yellow":"red";
+const lsi_c=v=>v==null?"muted":v>=90?"green":v>=80?"yellow":"red";
+const hq_c =v=>v==null?"muted":v>=55?"green":v>=45?"yellow":"red";
+const def_c=v=>v==null?"muted":Math.abs(v)<=10?"green":Math.abs(v)<=20?"yellow":"red";
+const calcLSI=(a,b)=>(!a||!b)?null:Math.round((Math.min(a,b)/Math.max(a,b))*100);
+const calcHQ =(f,e)=>(!f||!e)?null:Math.round((f/e)*100);
+const calcDef=(r,l)=>(!r||!l)?null:Math.round(((l-r)/l)*100);
+const CC={green:C.green,yellow:C.yellow,red:C.red,muted:C.muted};
+const BG={green:"rgba(62,207,142,0.12)",yellow:"rgba(245,200,66,0.12)",red:"rgba(242,95,92,0.12)",muted:"rgba(107,115,144,0.12)"};
+const age=(dob)=>dob?Math.floor((new Date()-new Date(dob))/31557600000):null;
+
+function Sp(){return html`<span style="display:inline-block;width:16px;height:16px;border:2px solid #252a38;border-top:2px solid #4f8ef7;border-radius:50%;animation:spin 0.7s linear infinite"/>`;}
+function Card({children,style={}}){return html`<div style=${{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 20px",...style}}>${children}</div>`;}
+function Sec({t}){return html`<div style=${{display:"flex",alignItems:"center",gap:8,marginBottom:12,paddingBottom:8,borderBottom:`1px solid ${C.border}`}}><div style=${{width:3,height:14,background:C.accent,borderRadius:2}}/><span style=${{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:C.muted}}>${t}</span></div>`;}
+function Bdg({txt,color="muted"}){return html`<span style=${{background:BG[color]||BG.muted,color:CC[color]||CC.muted,padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:600,fontFamily:"monospace"}}>${txt}</span>`;}
+function Lbl({t}){return html`<div style=${{fontSize:11,color:C.muted,fontWeight:600,marginBottom:4}}>${t}</div>`;}
+function Val({v,cls="",unit=""}){return html`<span class=${"mono "+cls}>${v!=null?v+unit:"—"}</span>`;}
+function Btn({onClick,color=C.accent,textColor="white",children,disabled=false,style={}}){return html`<button onClick=${onClick} disabled=${disabled} style=${{background:color,color:textColor,padding:"9px 18px",border:"none",borderRadius:6,cursor:"pointer",fontWeight:500,opacity:disabled?0.6:1,...style}}>${children}</button>`;}
+function Toast({msg,type}){if(!msg)return null;const c=type==="error"?C.red:C.green;return html`<div style=${{position:"fixed",bottom:24,right:24,background:type==="error"?"rgba(242,95,92,0.15)":"rgba(62,207,142,0.15)",border:`1px solid ${c}`,borderRadius:8,padding:"12px 20px",color:c,fontWeight:500,zIndex:9999,maxWidth:360}}>${msg}</div>`;}
+
+// ── ANALYSIS ENGINE ───────────────────────────────────────────────────────────
+function analyze(results,gender=""){
+  const r =results.find(x=>x.side==="right"&&x.muscle_group==="extensors");
+  const l =results.find(x=>x.side==="left" &&x.muscle_group==="extensors");
+  const rf=results.find(x=>x.side==="right"&&x.muscle_group==="flexors");
+  const lf=results.find(x=>x.side==="left" &&x.muscle_group==="flexors");
+  const flags=[];
+  const lsi_ext=calcLSI(r?.peak_torque,l?.peak_torque);
+  const lsi_flex=calcLSI(rf?.peak_torque,lf?.peak_torque);
+  const lsi_work=calcLSI(r?.work_per_rep,l?.work_per_rep);
+  const lsi_pwr=calcLSI(r?.avg_power,l?.avg_power);
+  const hq_r=calcHQ(rf?.peak_torque,r?.peak_torque);
+  const hq_l=calcHQ(lf?.peak_torque,l?.peak_torque);
+  const norm=NORMS[gender]||null;
+  [r,l,rf,lf].forEach(x=>{
+    if(!x)return;
+    const s=x.side==="right"?"Δεξί":"Αριστ.",g=x.muscle_group==="extensors"?"Εκτ.":"Κάμπτ.";
+    if(x.pt_cov>0.25)flags.push({t:"red",m:`CoV PT ${s} ${g}: ${x.pt_cov} — Μη αξιόπιστο αποτέλεσμα`});
+    else if(x.pt_cov>0.15)flags.push({t:"yellow",m:`CoV PT ${s} ${g}: ${x.pt_cov} — Μέτρια μεταβλητότητα`});
+    if(x.rom_cov>0.30)flags.push({t:"yellow",m:`CoV ROM ${s} ${g}: ${x.rom_cov} — Ασταθής αρχική θέση`});
+  });
+  if(lsi_ext!=null&&lsi_ext<90)flags.push({t:lsi_ext<80?"red":"yellow",m:`LSI Εκτ.: ${lsi_ext}% — κατώφλι RTS 90%`});
+  if(lsi_flex!=null&&lsi_flex<90)flags.push({t:lsi_flex<80?"red":"yellow",m:`LSI Κάμπτ.: ${lsi_flex}% — κατώφλι RTS 90%`});
+  if(hq_r!=null&&hq_r<50)flags.push({t:"red",m:`H/Q Δεξί: ${hq_r}% — Κρίσιμα χαμηλό (φυσιολ. 55-65%)`});
+  else if(hq_r!=null&&hq_r<55)flags.push({t:"yellow",m:`H/Q Δεξί: ${hq_r}% — Οριακά χαμηλό`});
+  if(hq_l!=null&&hq_l<50)flags.push({t:"red",m:`H/Q Αριστ.: ${hq_l}% — Κρίσιμα χαμηλό`});
+  else if(hq_l!=null&&hq_l<55)flags.push({t:"yellow",m:`H/Q Αριστ.: ${hq_l}% — Οριακά χαμηλό`});
+  if(norm&&r?.pt_bw!=null&&r.pt_bw<norm.ext_bw[0])flags.push({t:"yellow",m:`%BW Εκτ. Δεξί: ${r.pt_bw}% — κάτω από norm (${norm.ext_bw[0]}-${norm.ext_bw[1]}%)`});
+  if(norm&&l?.pt_bw!=null&&l.pt_bw<norm.ext_bw[0])flags.push({t:"yellow",m:`%BW Εκτ. Αριστ.: ${l.pt_bw}% — κάτω από norm`});
+  return {lsi_ext,lsi_flex,lsi_work,lsi_pwr,hq_r,hq_l,flags,r,l,rf,lf,norm};
+}
+
+function rtsScore(an){
+  const checks=[
+    {label:"LSI PT Εκτ. ≥90%",pass:an.lsi_ext!=null&&an.lsi_ext>=90,val:an.lsi_ext!=null?an.lsi_ext+"%":"—"},
+    {label:"LSI PT Κάμπτ. ≥90%",pass:an.lsi_flex!=null&&an.lsi_flex>=90,val:an.lsi_flex!=null?an.lsi_flex+"%":"—"},
+    {label:"LSI Work ≥90%",pass:an.lsi_work!=null&&an.lsi_work>=90,val:an.lsi_work!=null?an.lsi_work+"%":"—"},
+    {label:"LSI Power ≥90%",pass:an.lsi_pwr!=null&&an.lsi_pwr>=90,val:an.lsi_pwr!=null?an.lsi_pwr+"%":"—"},
+    {label:"H/Q Δεξί ≥55%",pass:an.hq_r!=null&&an.hq_r>=55,val:an.hq_r!=null?an.hq_r+"%":"—"},
+    {label:"H/Q Αριστ. ≥55%",pass:an.hq_l!=null&&an.hq_l>=55,val:an.hq_l!=null?an.hq_l+"%":"—"},
+    {label:"CoV PT <0.15",pass:an.r?.pt_cov!=null&&an.r.pt_cov<0.15&&an.rf?.pt_cov!=null&&an.rf.pt_cov<0.15,val:an.r?.pt_cov??"-"},
+  ];
+  const passed=checks.filter(c=>c.pass).length;
+  return {checks,passed,total:checks.length,pct:Math.round((passed/checks.length)*100)};
+}
+
+// ── PDF PARSER ────────────────────────────────────────────────────────────────
+// ── PDF SPLITTER ─────────────────────────────────────────────────────────────
+async function splitPDFToPages(base64) {
+  // Set worker
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
+  const pdf = await pdfjsLib.getDocument({data:bytes}).promise;
+  const numPages = pdf.numPages;
+  if(numPages <= 1) return [base64]; // single page, return as-is
+
+  // For each page, render to canvas and convert back to PDF-like base64
+  // Actually: use PDF.js to extract page as image, or better:
+  // Re-encode each page using pdf-lib approach
+  // Simpler: return array of page indices for the API to handle
+  return {numPages, base64, pageCount: numPages};
+}
+
+async function parsePDFPage(base64, pageHint="") {
+  const prompt=`Extract isokinetic data from this Cybex HUMAC NORM report page${pageHint?` (${pageHint})`:""}. Return ONLY valid JSON, no markdown.
+{"athlete_name":"","test_date":"YYYY-MM-DD","joint":"knee","protocol":"con_con","gravity_corrected":true,"speeds":[{"speed_deg_s":60,"reps":5,"results":[{"side":"right","muscle_group":"extensors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0},{"side":"left","muscle_group":"extensors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0},{"side":"right","muscle_group":"flexors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0},{"side":"left","muscle_group":"flexors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0}]}]}`;
+  const resp=await fetch(WORKER,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({messages:[{role:"user",content:[{type:"document",source:{type:"base64",media_type:"application/pdf",data:base64}},{type:"text",text:prompt}]}]})});
+  const data=await resp.json();
+  const text=data.content?.find(b=>b.type==="text")?.text||"";
+  let jsonText=text.trim().replace(/^```json\s*/,"").replace(/^```\s*/,"").replace(/\s*```$/,"");
+  const s=jsonText.indexOf("{"),en=jsonText.lastIndexOf("}");
+  if(s>=0&&en>s) jsonText=jsonText.substring(s,en+1);
+  return JSON.parse(jsonText);
+}
+
+async function splitAndParsePDF(base64) {
+  // Use PDF.js to check page count and extract each page as separate PDF
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
+  const pdfDoc = await pdfjsLib.getDocument({data:bytes}).promise;
+  const numPages = pdfDoc.numPages;
+
+  if(numPages === 1) {
+    // Single page — parse normally
+    return await parsePDFPage(base64, "single speed");
+  }
+
+  // Multi-page: render each page to image and send as image
+  const pageResults = [];
+  let baseInfo = null;
+
+  for(let pageNum=1; pageNum<=numPages; pageNum++) {
+    const page = await pdfDoc.getPage(pageNum);
+    const viewport = page.getViewport({scale: 2.0});
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext("2d");
+    await page.render({canvasContext:ctx, viewport}).promise;
+    const imageB64 = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+
+    // Send as image to Claude
+    const prompt=`Extract isokinetic data from this Cybex HUMAC NORM report page. Return ONLY valid JSON, no markdown.
+{"speed_deg_s":60,"reps":5,"athlete_name":"","test_date":"YYYY-MM-DD","joint":"knee","protocol":"con_con","gravity_corrected":true,"results":[{"side":"right","muscle_group":"extensors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0},{"side":"left","muscle_group":"extensors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0},{"side":"right","muscle_group":"flexors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0},{"side":"left","muscle_group":"flexors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0}]}`;
+
+    const resp=await fetch(WORKER,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:"image/jpeg",data:imageB64}},{type:"text",text:prompt}]}]})});
+    const apiData=await resp.json();
+    const text=apiData.content?.find(b=>b.type==="text")?.text||"";
+    let jsonText=text.trim().replace(/^```json\s*/,"").replace(/^```\s*/,"").replace(/\s*```$/,"");
+    const s=jsonText.indexOf("{"),en=jsonText.lastIndexOf("}");
+    if(s>=0&&en>s) jsonText=jsonText.substring(s,en+1);
+    const pageData = JSON.parse(jsonText);
+
+    if(!baseInfo && pageData.athlete_name) {
+      baseInfo = {athlete_name:pageData.athlete_name, test_date:pageData.test_date, joint:pageData.joint||"knee", protocol:pageData.protocol||"con_con", gravity_corrected:pageData.gravity_corrected??true};
+    }
+    pageResults.push({speed_deg_s:pageData.speed_deg_s||60, reps:pageData.reps||5, results:pageData.results||[]});
+  }
+
+  return {...(baseInfo||{}), speeds: pageResults};
+}
+
+async function parsePDFSimple(base64){
+  const prompt=`Extract ONLY the isokinetic data from this Cybex report. Return ONLY JSON:
+{"athlete_name":"","test_date":"YYYY-MM-DD","joint":"knee","protocol":"con_con","gravity_corrected":true,"speeds":[{"speed_deg_s":60,"reps":5,"results":[{"side":"right","muscle_group":"extensors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0},{"side":"left","muscle_group":"extensors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0},{"side":"right","muscle_group":"flexors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0},{"side":"left","muscle_group":"flexors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"rom":0,"rom_cov":0,"joint_angle_peak":0,"time_to_peak":0,"force_decay":0}]}]}`;
+  const resp=await fetch(WORKER,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({messages:[{role:"user",content:[{type:"document",source:{type:"base64",media_type:"application/pdf",data:base64}},{type:"text",text:prompt}]}]})});
+  const data=await resp.json();
+  const text=data.content?.find(b=>b.type==="text")?.text||"";
+  let jsonText=text.trim().replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/\s*```$/,'');
+  const s=jsonText.indexOf('{'),en=jsonText.lastIndexOf('}');
+  if(s>=0&&en>s) jsonText=jsonText.substring(s,en+1);
+  return JSON.parse(jsonText);
+}
+
+async function parsePDF(base64){
+  const prompt=`Extract isokinetic data from this Cybex HUMAC NORM PDF. May have MULTIPLE speeds on separate pages - extract ALL.
+Return ONLY valid JSON, no markdown.
+{"athlete_name":"","test_date":"YYYY-MM-DD","joint":"knee","protocol":"con_con","gravity_corrected":true,"speeds":[{"speed_deg_s":60,"reps":5,"results":[{"side":"right","muscle_group":"extensors","peak_torque":0,"pt_cov":0,"pt_bw":0,"work_per_rep":0,"work_cov":0,"avg_power":0,"power_cov":0,"joint_angle_peak":0,"rom":0,"rom_cov":0,"time_to_peak":0,"force_decay":0}]}]}
+Include right+left extensors+flexors for EACH speed. Keep numbers as-is from the report.`;
+  const resp=await fetch(WORKER,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({messages:[{role:"user",content:[{type:"document",source:{type:"base64",media_type:"application/pdf",data:base64}},{type:"text",text:prompt}]}]})});
+  const data=await resp.json();
+  const text=data.content?.find(b=>b.type==="text")?.text||"";
+  // More aggressive JSON extraction
+  let jsonText = text.trim();
+  // Remove markdown code blocks
+  jsonText = jsonText.replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/\s*```$/,'');
+  // Find JSON boundaries
+  const jsonStart = jsonText.indexOf('{');
+  const jsonEnd = jsonText.lastIndexOf('}');
+  if(jsonStart>=0 && jsonEnd>jsonStart) jsonText = jsonText.substring(jsonStart, jsonEnd+1);
+  const parsed=JSON.parse(jsonText);
+  // Normalize all possible formats
+  if(!parsed.speeds) {
+    // Format 1: {results:[...], speed_deg_s:60}
+    if(parsed.results) {
+      parsed.speeds = [{speed_deg_s:parsed.speed_deg_s||60, reps:parsed.reps||5, results:parsed.results}];
+    }
+    // Format 2: {60: {results:[...]}, 180: {results:[...]}}
+    else if(Object.keys(parsed).some(k=>!isNaN(k))) {
+      parsed.speeds = Object.entries(parsed)
+        .filter(([k])=>!isNaN(k))
+        .map(([k,v])=>({speed_deg_s:+k, reps:v.reps||5, results:v.results||[]}));
+    }
+    // Format 3: flat array of results with speed field
+    else if(Array.isArray(parsed)) {
+      const bySpeed = {};
+      parsed.forEach(r=>{ const s=r.speed_deg_s||60; if(!bySpeed[s]) bySpeed[s]=[]; bySpeed[s].push(r); });
+      parsed = {speeds: Object.entries(bySpeed).map(([s,results])=>({speed_deg_s:+s,reps:5,results}))};
+    }
+    else {
+      parsed.speeds = [];
+    }
+  }
+  // Ensure each speed has a results array
+  if(parsed.speeds) {
+    parsed.speeds = parsed.speeds.map(s=>({...s, results: Array.isArray(s.results)?s.results:[]}));
+  }
+  return parsed;
+}
+
+
+// ── CHART COMPONENT ───────────────────────────────────────────────────────────
+function TrendCharts({measurements}){
+  const ptRef=useRef(null),hqRef=useRef(null),lsiRef=useRef(null);
+  const chartRefs=useRef({});
+  useEffect(()=>{
+    if(!measurements.length)return;
+    const sorted=[...measurements].sort((a,b)=>new Date(a.test_date)-new Date(b.test_date));
+    const labels=sorted.map(m=>m.test_date);
+    const gv=(m,s,g,k)=>m.test_results?.find(r=>r.side===s&&r.muscle_group===g)?.[k]??null;
+    const ds_pt=[
+      {label:"Εκτ. Δεξί",data:sorted.map(m=>gv(m,"right","extensors","peak_torque")),borderColor:C.accent,tension:0.3,pointRadius:5,fill:false},
+      {label:"Εκτ. Αριστ.",data:sorted.map(m=>gv(m,"left","extensors","peak_torque")),borderColor:"#a78bfa",tension:0.3,pointRadius:5,fill:false},
+      {label:"Κάμπτ. Δεξί",data:sorted.map(m=>gv(m,"right","flexors","peak_torque")),borderColor:C.green,tension:0.3,pointRadius:5,fill:false},
+      {label:"Κάμπτ. Αριστ.",data:sorted.map(m=>gv(m,"left","flexors","peak_torque")),borderColor:C.yellow,tension:0.3,pointRadius:5,fill:false},
+    ];
+    const ds_hq=[
+      {label:"H/Q Δεξί",data:sorted.map(m=>{const f=gv(m,"right","flexors","peak_torque"),e=gv(m,"right","extensors","peak_torque");return(f&&e)?Math.round((f/e)*100):null;}),borderColor:C.accent,tension:0.3,pointRadius:5,fill:false},
+      {label:"H/Q Αριστ.",data:sorted.map(m=>{const f=gv(m,"left","flexors","peak_torque"),e=gv(m,"left","extensors","peak_torque");return(f&&e)?Math.round((f/e)*100):null;}),borderColor:C.green,tension:0.3,pointRadius:5,fill:false},
+    ];
+    const ds_lsi=[
+      {label:"LSI PT Εκτ.",data:sorted.map(m=>calcLSI(gv(m,"right","extensors","peak_torque"),gv(m,"left","extensors","peak_torque"))),borderColor:C.accent,tension:0.3,pointRadius:5,fill:false},
+      {label:"LSI PT Κάμπτ.",data:sorted.map(m=>calcLSI(gv(m,"right","flexors","peak_torque"),gv(m,"left","flexors","peak_torque"))),borderColor:C.green,tension:0.3,pointRadius:5,fill:false},
+      {label:"LSI Work",data:sorted.map(m=>calcLSI(gv(m,"right","extensors","work_per_rep"),gv(m,"left","extensors","work_per_rep"))),borderColor:C.yellow,tension:0.3,pointRadius:5,fill:false},
+    ];
+    const opts=(title,yLabel,min,max,refLine)=>({
+      responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{labels:{color:C.muted,font:{size:11}}},title:{display:true,text:title,color:C.text,font:{size:13,weight:"600"}},
+        annotation:refLine?{annotations:{l1:{type:"line",yMin:refLine,yMax:refLine,borderColor:"rgba(242,95,92,0.5)",borderWidth:1.5,borderDash:[5,5]}}}:{}},
+      scales:{x:{ticks:{color:C.muted,font:{size:10}},grid:{color:"rgba(37,42,56,0.4)"}},
+               y:{min,max,ticks:{color:C.muted,font:{size:10}},grid:{color:"rgba(37,42,56,0.4)"},title:{display:true,text:yLabel,color:C.muted,font:{size:10}}}}
+    });
+    [[ptRef,"pt",ds_pt,"Peak Torque (Nm)","Nm",0,null,null],
+     [hqRef,"hq",ds_hq,"H/Q Ratio (%)","% ",40,100,55],
+     [lsiRef,"lsi",ds_lsi,"Limb Symmetry Index (%)","% ",60,100,90]
+    ].forEach(([ref,key,datasets,title,yLabel,min,max,refLine])=>{
+      if(!ref.current)return;
+      if(chartRefs.current[key])chartRefs.current[key].destroy();
+      chartRefs.current[key]=new Chart(ref.current,{type:"line",data:{labels,datasets},options:opts(title,yLabel,min,max,refLine)});
+    });
+    return()=>Object.values(chartRefs.current).forEach(c=>c?.destroy());
+  },[measurements]);
+  if(measurements.length<2)return html`<${Card} style=${{textAlign:"center",padding:32,color:C.muted}}><div style=${{fontSize:28,marginBottom:8}}>📈</div><div>Χρειάζονται τουλάχιστον 2 μετρήσεις για γράφημα εξέλιξης.</div><//>`;
+  return html`
+    <div style=${{display:"flex",flexDirection:"column",gap:20}}>
+      <${Card}><div style=${{height:220}}><canvas ref=${ptRef}/></div><//>
+      <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
+        <${Card}><div style=${{height:200}}><canvas ref=${hqRef}/></div><//>
+        <${Card}><div style=${{height:200}}><canvas ref=${lsiRef}/></div><//>
+      </div>
+    </div>`;
+}
+
+// ── RTS CARD ──────────────────────────────────────────────────────────────────
+function RTSCard({an}){
+  const {checks,passed,total,pct}=rtsScore(an);
+  const color=pct>=85?C.green:pct>=70?C.yellow:C.red;
+  const verdict=pct>=85?"✅ RTS Εγκεκριμένο":pct>=70?"⚠️ RTS Υπό Αξιολόγηση":"❌ RTS Μη Εγκεκριμένο";
+  return html`
+    <${Card} style=${{marginBottom:16}}>
+      <${Sec} t="Return to Sport Scorecard"/>
+      <div style=${{display:"flex",alignItems:"center",gap:24,marginBottom:12}}>
+        <div style=${{textAlign:"center"}}>
+          <div style=${{fontSize:42,fontWeight:700,color,fontFamily:"monospace"}}>${pct}%</div>
+          <div style=${{fontSize:11,color:C.muted,marginTop:2}}>${passed}/${total} κριτήρια</div>
+        </div>
+        <div style=${{flex:1}}>
+          <div style=${{fontSize:14,fontWeight:600,color,marginBottom:8}}>${verdict}</div>
+          <div style=${{background:C.bg3,borderRadius:6,height:8,overflow:"hidden"}}>
+            <div style=${{height:"100%",width:pct+"%",background:color,borderRadius:6}}/>
+          </div>
+        </div>
+      </div>
+      <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        ${checks.map((c,i)=>html`
+          <div key=${i} style=${{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:C.bg3,borderRadius:6,border:`1px solid ${c.pass?"rgba(62,207,142,0.2)":"rgba(242,95,92,0.15)"}`}}>
+            <span style=${{fontSize:14}}>${c.pass?"✅":"❌"}</span>
+            <span style=${{fontSize:11,color:C.muted,flex:1}}>${c.label}</span>
+            <span style=${{fontFamily:"monospace",fontSize:11,color:c.pass?C.green:C.red,fontWeight:600}}>${c.val}</span>
+          </div>
+        `)}
+      </div>
+    <//>`;
+}
+
+// ── ANALYSIS VIEW ─────────────────────────────────────────────────────────────
+function AnalysisView({measurements,selected,athlete}){
+  const [selId,setSelId]=useState(selected[0]||measurements[0]?.id||"");
+  const [reportLang,setReportLang]=useState("el");
+  const meas=measurements.find(m=>m.id===selId)||measurements[0];
+  if(!meas)return html`<div style=${{color:C.muted,padding:20}}>Επίλεξε μέτρηση.</div>`;
+  const an=analyze(meas.test_results||[],athlete?.gender||"");
+  const {lsi_ext,lsi_flex,lsi_work,lsi_pwr,hq_r,hq_l,flags,r,l,rf,lf,norm}=an;
+
+  return html`
+    <div>
+      ${measurements.length>1&&html`
+        <div style=${{marginBottom:16}}>
+          <${Lbl} t="Επιλογή Μέτρησης"/>
+          <select value=${selId} onChange=${e=>setSelId(e.target.value)}>
+            ${measurements.map(m=>html`<option key=${m.id} value=${m.id}>${m.test_date} — ${m.joint} ${m.speed_deg_s}°/s ${m.notes?"("+m.notes+")":""}</option>`)}
+          </select>
+        </div>
+      `}
+      ${flags.length>0&&html`<div style=${{marginBottom:16}}>${flags.map((f,i)=>html`<div key=${i} style=${{background:f.t==="red"?"rgba(242,95,92,0.08)":"rgba(245,200,66,0.08)",border:`1px solid ${f.t==="red"?C.red:C.yellow}`,borderRadius:8,padding:"8px 14px",marginBottom:6,color:f.t==="red"?C.red:C.yellow,fontSize:12,fontWeight:500}}>⚠ ${f.m}</div>`)}</div>`}
+
+      <${Sec} t="Limb Symmetry Index & H/Q"/>
+      <div style=${{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:16}}>
+        ${[["LSI PT Εκτ.",lsi_ext,"≥90%",false],["LSI PT Κάμπτ.",lsi_flex,"≥90%",false],["LSI Work",lsi_work,"≥90%",false],["LSI Power",lsi_pwr,"≥90%",false],["H/Q Δεξί",hq_r,"55-65%",true],["H/Q Αριστ.",hq_l,"55-65%",true]].map(([lbl,val,n,isHQ])=>html`
+          <${Card} key=${lbl} style=${{textAlign:"center"}}>
+            <div style=${{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>${lbl}</div>
+            <div class=${"mono "+(isHQ?hq_c(val):lsi_c(val))} style=${{fontSize:26,fontWeight:700}}>${val!=null?val+"%":"—"}</div>
+            <div style=${{fontSize:10,color:C.muted,marginTop:4}}>Φυσιολ. ${n}</div>
+          <//>
+        `)}
+      </div>
+
+      <${RTSCard} an=${an}/>
+
+      ${norm&&html`
+        <${Card} style=${{marginBottom:16}}>
+          <${Sec} t=${"Normative Data (" + (athlete?.gender==="male"?"Άνδρες":"Γυναίκες") + ", 60°/s)"}/>
+          <div style=${{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12}}>
+            ${[["%BW Εκτ. Δεξί",r?.pt_bw,norm.ext_bw],["%BW Εκτ. Αριστ.",l?.pt_bw,norm.ext_bw],["%BW Κάμπτ. Δεξί",rf?.pt_bw,norm.flex_bw],["%BW Κάμπτ. Αριστ.",lf?.pt_bw,norm.flex_bw]].map(([lbl,val,range])=>{
+              const inR=val!=null&&val>=range[0]&&val<=range[1],below=val!=null&&val<range[0];
+              const c=val==null?"muted":inR?"green":below?"red":"yellow";
+              return html`<div key=${lbl} style=${{textAlign:"center",background:C.bg3,borderRadius:8,padding:"10px 8px"}}>
+                <div style=${{fontSize:10,color:C.muted,marginBottom:4}}>${lbl}</div>
+                <div class=${"mono "+c} style=${{fontSize:18,fontWeight:700}}>${val!=null?val+"%":"—"}</div>
+                <div style=${{fontSize:9,color:C.muted,marginTop:2}}>Norm: ${range[0]}-${range[1]}%</div>
+              </div>`;
+            })}
+          </div>
+        <//>
+      `}
+
+      <${Sec} t="Αναλυτικά Αποτελέσματα"/>
+      <${Card} style=${{padding:0,marginBottom:16}}>
+        <table><thead><tr><th>Παράμετρος</th><th>Δεξί Εκτ.</th><th>Αριστ. Εκτ.</th><th>Deficit</th><th>Δεξί Κάμπτ.</th><th>Αριστ. Κάμπτ.</th><th>Deficit</th></tr></thead>
+        <tbody>${[["Peak Torque (Nm)","peak_torque",""],["CoV PT","pt_cov",""],["% BW","pt_bw","%"],["Work/Rep (Nm)","work_per_rep",""],["CoV Work","work_cov",""],["Avg Power (W)","avg_power",""],["ROM (°)","rom","°"],["CoV ROM","rom_cov",""],["Angle@Peak (°)","joint_angle_peak","°"],["Time Peak (s)","time_to_peak","s"],["Force Decay (s)","force_decay","s"]].map(([lbl,key,unit])=>{
+          const de=calcDef(r?.[key],l?.[key]),df=calcDef(rf?.[key],lf?.[key]),isCov=key.includes("cov");
+          return html`<tr key=${key}><td class="muted" style=${{fontSize:12}}>${lbl}</td><td><${Val} v=${r?.[key]} cls=${isCov?cov_c(r?.[key]):""} unit=${unit}/></td><td><${Val} v=${l?.[key]} cls=${isCov?cov_c(l?.[key]):""} unit=${unit}/></td><td>${de!=null&&html`<${Bdg} txt=${(de>0?"+":"")+de+"%"} color=${def_c(de)}/>`}</td><td><${Val} v=${rf?.[key]} cls=${isCov?cov_c(rf?.[key]):""} unit=${unit}/></td><td><${Val} v=${lf?.[key]} cls=${isCov?cov_c(lf?.[key]):""} unit=${unit}/></td><td>${df!=null&&html`<${Bdg} txt=${(df>0?"+":"")+df+"%"} color=${def_c(df)}/>`}</td></tr>`;
+        })}</tbody></table>
+      <//>
+
+      <div style=${{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+        <select value=${reportLang} onChange=${e=>setReportLang(e.target.value)} style=${{width:"auto",padding:"8px 12px"}}>
+          <option value="el">🇬🇷 Ελληνικά</option>
+          <option value="en">🇬🇧 English</option>
+        </select>
+        <${Btn} onClick=${()=>generateReport(athlete,meas,reportLang,measurements)} color=${"#1a7a4a"}>📄 Dark Report<//>
+        <button onClick=${()=>window.print()} style=${{background:C.bg3,color:C.muted,padding:"9px 18px",border:`1px solid ${C.border}`,borderRadius:6,cursor:"pointer"}}>🖨 Εκτύπωση</button>
+      </div>
+    </div>`;
+}
+
+// ── MARKDOWN RENDERER ──────────────────────────────────────────────────────────
+function md2html(text) {
+  if(!text) return "";
+  const lines = text.split("\n");
+  let out = "";
+  let inTable = false;
+  let tableRows = [];
+  let paraBuffer = [];
+
+  const flushPara = () => {
+    if(!paraBuffer.length) return;
+    const combined = paraBuffer.join(" ");
+    const rendered = applyInline(combined);
+    out += `<p style="margin:6px 0;font-size:12px;color:#e8eaf0;line-height:1.8;orphans:3;widows:3">${rendered}</p>`;
+    paraBuffer = [];
+  };
+
+  const flushTable = () => {
+    if(!tableRows.length) return;
+    out += '<div class="no-break" style="margin:8px 0 14px;border:1px solid #252a38;border-radius:6px;overflow:hidden"><table style="width:100%;border-collapse:collapse">';
+    out += tableRows.join("");
+    out += "</table></div>";
+    tableRows = []; inTable = false;
+  };
+
+  const applyInline = (s) => s
+    .replace(/[*][*](.+?)[*][*]/g, "<strong style=\'color:#e8eaf0;font-weight:600\'>$1</strong>")
+    .replace(/[*](.+?)[*]/g, "<em style=\'color:#a0a8c0\'>$1</em>");
+
+  for(const raw of lines) {
+    const line = raw.trim();
+
+    // Table row
+    if(line.startsWith("|") && line.endsWith("|")) {
+      flushPara();
+      inTable = true;
+      const cells = line.slice(1,-1).split("|");
+      if(cells.every(c=>c.trim().match(/^[-:]+$/))) continue;
+      const isHeader = tableRows.length === 0;
+      const tag = isHeader ? "th" : "td";
+      const style = isHeader
+        ? "padding:6px 10px;font-size:10px;font-weight:700;color:#6b7390;text-transform:uppercase;background:#1a1e28;border-bottom:1px solid #252a38;text-align:left"
+        : "padding:6px 10px;font-size:11px;color:#e8eaf0;border-bottom:1px solid rgba(37,42,56,0.4);vertical-align:top";
+      tableRows.push("<tr>" + cells.map(c=>`<${tag} style="${style}">${applyInline(c.trim())}</${tag}>`).join("") + "</tr>");
+      continue;
+    }
+    if(inTable) flushTable();
+
+    // HR
+    if(line === "---") { flushPara(); out += '<hr style="border:none;border-top:1px solid #252a38;margin:10px 0">'; continue; }
+
+    // H1
+    if(line.startsWith("# ")) { flushPara(); out += `<h1 style="font-size:14px;font-weight:700;color:#e8eaf0;margin:14px 0 6px;page-break-after:avoid">${applyInline(line.slice(2))}</h1>`; continue; }
+
+    // H2
+    if(line.startsWith("## ")) { flushPara(); out += `<h2 style="font-size:13px;font-weight:700;color:#4f8ef7;margin:14px 0 4px;padding-bottom:4px;border-bottom:1px solid #252a38;page-break-after:avoid">${applyInline(line.slice(3))}</h2>`; continue; }
+
+    // H3
+    if(line.startsWith("### ")) { flushPara(); out += `<h3 style="font-size:12px;font-weight:700;color:#b0b8d0;margin:10px 0 4px;page-break-after:avoid">${applyInline(line.slice(4))}</h3>`; continue; }
+
+    // Blockquote
+    if(line.startsWith("> ")) { flushPara(); out += `<div style="border-left:3px solid #4f8ef7;padding:6px 12px;margin:6px 0;background:rgba(79,142,247,0.06);font-size:11px;color:#6b7390;page-break-inside:avoid">${applyInline(line.slice(2))}</div>`; continue; }
+
+    // Bullet
+    if(line.startsWith("- ")) {
+      flushPara();
+      const txt = applyInline(line.slice(2));
+      out += `<div style="display:flex;gap:8px;margin:3px 0;font-size:12px;color:#e8eaf0;page-break-inside:avoid"><span style="color:#4f8ef7;flex-shrink:0">•</span><span>${txt}</span></div>`;
+      continue;
+    }
+
+    // Empty line — flush paragraph
+    if(!line) { flushPara(); out += '<div style="height:6px"></div>'; continue; }
+
+    // Accumulate paragraph lines
+    paraBuffer.push(line);
+  }
+
+  flushPara();
+  if(inTable) flushTable();
+
+  return `<div style="font-size:12px;color:#e8eaf0;line-height:1.8">${out}</div>`;
+}
+
+
+// ── DARK REPORT GENERATOR ────────────────────────────────────────────────────
+function buildReportHTML(athlete, measurements, lang="el") {
+  const t=T[lang];
+  const a=age(athlete.dob);
+  const genderStr=athlete.gender==="male"?t.male:athlete.gender==="female"?t.female:"—";
+  const sorted=[...measurements].sort((a,b)=>new Date(a.test_date)-new Date(b.test_date));
+  const latest=sorted[sorted.length-1];
+  if(!latest) return "<p>Δεν υπάρχουν μετρήσεις.</p>";
+  const an=analyze(latest.test_results||[],athlete.gender);
+  const {r,l,rf,lf,flags,lsi_ext,lsi_flex,lsi_work,lsi_pwr,hq_r,hq_l,norm}=an;
+  const {checks,passed,total,pct}=rtsScore(an);
+  const rtsColor=pct>=85?"#3ecf8e":pct>=70?"#f5c842":"#f25f5c";
+  const rtsVerdict=pct>=85?t.rts_approved:pct>=70?t.rts_pending:t.rts_denied;
+  const cc={green:"#3ecf8e",yellow:"#f5c842",red:"#f25f5c",muted:"#6b7390"};
+  const bg={green:"rgba(62,207,142,0.12)",yellow:"rgba(245,200,66,0.12)",red:"rgba(242,95,92,0.12)",muted:"rgba(107,115,144,0.12)"};
+  const lsiCls=v=>v==null?"muted":v>=90?"green":v>=80?"yellow":"red";
+  const hqCls=v=>v==null?"muted":v>=55?"green":v>=45?"yellow":"red";
+  const defCls=v=>v==null?"muted":Math.abs(v)<=10?"green":Math.abs(v)<=20?"yellow":"red";
+  const covCls=v=>v==null?"muted":v<0.15?"green":v<0.25?"yellow":"red";
+  const fmt=(v,u="")=>v!=null?v+u:"—";
+  const calcDefR=(a,b)=>(!a||!b)?null:Math.round(((b-a)/b)*100);
+  const kpi=(label,val,unit,norm_,cls)=>`<div style="text-align:center;background:#1a1e28;border:1px solid #252a38;border-radius:10px;padding:16px 12px"><div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7390;margin-bottom:8px">${label}</div><div style="font-size:26px;font-weight:700;font-family:'JetBrains Mono',monospace;color:${cc[cls]||cc.muted}">${val!=null?val+unit:"—"}</div><div style="font-size:9px;color:#6b7390;margin-top:6px">${norm_}</div></div>`;
+  const badge=(txt,cls)=>`<span style="background:${bg[cls]||bg.muted};color:${cc[cls]||cc.muted};padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;font-family:monospace">${txt}</span>`;
+  const secTitle=(t)=>`<div style="display:flex;align-items:center;gap:8px;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #252a38;page-break-after:avoid;break-after:avoid"><div style="width:3px;height:14px;background:#4f8ef7;border-radius:2px"></div><span style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7390">${t}</span></div>`;
+  const params=[["Peak Torque (Nm)","peak_torque",""],["CoV PT","pt_cov",""],["% BW","pt_bw","%"],["Work/Rep (Nm)","work_per_rep",""],["Avg Power (W)","avg_power",""],["ROM (°)","rom","°"],["CoV ROM","rom_cov",""],["Angle@Peak (°)","joint_angle_peak","°"],["Time Peak (s)","time_to_peak","s"],["Force Decay (s)","force_decay","s"]];
+  const normRows=norm?[["%BW Ext R",r?.pt_bw,norm.ext_bw],["%BW Ext L",l?.pt_bw,norm.ext_bw],["%BW Flex R",rf?.pt_bw,norm.flex_bw],["%BW Flex L",lf?.pt_bw,norm.flex_bw]]:[];
+  const timelineRows=sorted.map(m=>{const an2=analyze(m.test_results||[],athlete.gender);const{passed:p2,total:t2}=rtsScore(an2);const rtsPct=Math.round((p2/t2)*100);const rtsC=rtsPct>=85?"green":rtsPct>=70?"yellow":"red";return`<tr><td style="font-weight:600;color:#e8eaf0">${m.test_date}</td><td style="text-transform:capitalize;color:#6b7390">${m.joint}</td><td><span style="background:rgba(107,115,144,0.12);color:#6b7390;padding:2px 6px;border-radius:3px;font-size:10px;font-family:monospace">${m.protocol}</span></td><td style="font-family:monospace;color:#6b7390">${m.speed_deg_s}°/s</td><td style="font-family:monospace;color:${cc[lsiCls(an2.lsi_ext)]}">${fmt(an2.lsi_ext,"%")}</td><td style="font-family:monospace;color:${cc[hqCls(an2.hq_r)]}">${fmt(an2.hq_r,"%")}</td><td style="font-family:monospace;color:${cc[hqCls(an2.hq_l)]}">${fmt(an2.hq_l,"%")}</td><td>${badge(rtsPct+"%",rtsC)}</td><td style="color:#6b7390;font-size:11px">${m.notes||"—"}</td></tr>`;}).join("");
+
+  const teamName = _teams.find(t=>t.id===athlete.team_id)?.name||"";
+
+
+  return `<!DOCTYPE html><html lang="${lang}"><head><meta charset="UTF-8"><title>${t.subtitle} — ${athlete.name}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d0f14;color:#e8eaf0;font-family:'Inter',sans-serif;font-size:13px;line-height:1.6;min-height:100vh}
+table{width:100%;border-collapse:collapse}
+th{font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#6b7390;padding:7px 10px;text-align:left;border-bottom:1px solid #252a38;background:#1a1e28}
+td{padding:8px 10px;font-size:12px;border-bottom:1px solid rgba(37,42,56,0.5)}
+tr:last-child td{border-bottom:none}
+.kpi-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px}
+.rts-checks{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.norm-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+.compare-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px}
+.no-break{page-break-inside:avoid;break-inside:avoid}
+.clinical-section{margin-bottom:16px;background:#13161e;border:1px solid #252a38;border-radius:8px;padding:14px 16px;page-break-inside:avoid;break-inside:avoid}
+.clinical-text{font-size:12px;color:#e8eaf0;line-height:1.8;white-space:pre-wrap;word-wrap:break-word}
+
+@media print{
+  /* Switch to WHITE background for clean printing */
+  body{
+    background:#ffffff!important;
+    color:#1a1a2e!important;
+    -webkit-print-color-adjust:exact;
+    print-color-adjust:exact;
+    font-size:11px!important;
+  }
+  /* Override all dark backgrounds to white/light */
+  div[style*="background:#0d0f14"],
+  div[style*="background:#13161e"],
+  div[style*="background:#1a1e28"]{
+    background:#f8f9ff!important;
+  }
+  /* Override all light text to dark */
+  *{color:#1a1a2e!important}
+  /* Keep accent colors */
+  .accent-blue{color:#2563eb!important}
+  /* Tables */
+  th{background:#f0f2f8!important;color:#374151!important;border-bottom:1px solid #d1d5db!important}
+  td{border-bottom:1px solid #e5e7eb!important;color:#1a1a2e!important}
+  /* Borders to light gray */
+  div[style*="border:1px solid #252a38"]{border-color:#d1d5db!important}
+  div[style*="border-bottom:1px solid #252a38"]{border-color:#d1d5db!important}
+  /* HR */
+  hr{border-color:#d1d5db!important}
+  .no-print{display:none!important}
+  .kpi-grid,.rts-checks,.norm-grid,.compare-grid{display:grid!important}
+  .no-break{page-break-inside:avoid!important;break-inside:avoid!important}
+  .clinical-section{
+    background:#f8f9ff!important;
+    border-color:#d1d5db!important;
+    page-break-inside:avoid!important;
+    break-inside:avoid!important;
+  }
+  table{page-break-inside:auto}
+  tr{page-break-inside:avoid;break-inside:avoid}
+  h1,h2,h3{page-break-after:avoid;break-after:avoid;color:#1a1a2e!important}
+  p{orphans:3;widows:3}
+  /* Header bar */
+  div[style*="background:#13161e"]{background:#f0f4ff!important}
+  /* Green/red/yellow keep their colors for clinical meaning */
+  [style*="color:#3ecf8e"]{color:#166534!important}
+  [style*="color:#f25f5c"]{color:#991b1b!important}
+  [style*="color:#f5c842"]{color:#854d0e!important}
+  [style*="color:#4f8ef7"]{color:#1d4ed8!important}
+  [style*="color:#6b7390"]{color:#4b5563!important}
+}
+</style>
+</head><body data-filename="${athlete.name.replace(/\s+/g,"_")}_Report_${new Date().toISOString().split("T")[0]}.html">
+<div style="background:#13161e;border-bottom:1px solid #252a38;padding:20px 40px;display:flex;justify-content:space-between;align-items:center">
+  <div style="display:flex;align-items:center;gap:14px"><div style="width:42px;height:42px;background:#4f8ef7;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px">⚡</div><div><div style="font-size:15px;font-weight:700;color:#e8eaf0">360 Ergometric Tests</div><div style="font-size:11px;color:#6b7390">ergometrictests.com · +357 99341202</div></div></div>
+  <div style="text-align:right"><div style="font-size:13px;font-weight:600;color:#e8eaf0">${t.subtitle}</div><div style="font-size:11px;color:#6b7390">${t.print_date}: ${new Date().toLocaleDateString(lang==="el"?"el-GR":"en-GB")}</div></div>
+</div>
+<div style="background:linear-gradient(135deg,#0d1525 0%,#111827 60%,#0d1520 100%);border-bottom:1px solid #252a38;padding:32px 40px">
+  <div style="font-size:10px;font-weight:700;letter-spacing:0.12em;color:#4f8ef7;text-transform:uppercase;margin-bottom:6px">ΑΞΙΟΛΟΓΗΣΗ ΑΘΛΗΤΗ</div>
+  <div style="font-size:28px;font-weight:700;color:#e8eaf0;margin-bottom:4px">${athlete.name}</div>
+  <div style="font-size:13px;color:#6b7390;margin-bottom:8px">${[a&&a+" "+t.age,genderStr,athlete.weight_kg&&athlete.weight_kg+"kg",athlete.height_cm&&athlete.height_cm+"cm",athlete.sport].filter(Boolean).join(" · ")}</div>
+  ${athlete.id_number?`<div style="font-size:11px;color:#6b7390;margin-bottom:4px">ID: ${athlete.id_number}</div>`:""}
+  ${teamName?`<div style="font-size:11px;color:#4f8ef7;margin-bottom:8px">🏆 ${teamName}</div>`:""}
+  ${athlete.injury_history?`<div style="margin-bottom:8px;background:rgba(242,95,92,0.08);border:1px solid rgba(242,95,92,0.2);border-radius:6px;padding:8px 12px"><div style="font-size:9px;color:#f25f5c;font-weight:700;margin-bottom:3px;text-transform:uppercase">ΙΣΤΟΡΙΚΟ ΤΡΑΥΜΑΤΙΣΜΩΝ</div><div style="font-size:11px;color:#6b7390">${athlete.injury_history}</div></div>`:""}
+  ${athlete.surgeries?`<div style="margin-bottom:16px;background:rgba(245,200,66,0.08);border:1px solid rgba(245,200,66,0.2);border-radius:6px;padding:8px 12px"><div style="font-size:9px;color:#f5c842;font-weight:700;margin-bottom:3px;text-transform:uppercase">ΕΓΧΕΙΡΗΣΕΙΣ</div><div style="font-size:11px;color:#6b7390">${athlete.surgeries}</div></div>`:""}
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+    ${[["Μετρήσεις",measurements.length],["Τελευταία",latest.test_date],["Άρθρωση",latest.joint],["Ταχύτητα",latest.speed_deg_s+"°/s"]].map(([k,v])=>`<div style="background:#1a1e28;border:1px solid #252a38;border-radius:20px;padding:5px 14px;font-size:12px;color:#6b7390">${k}: <span style="color:#e8eaf0;font-weight:500">${v}</span></div>`).join("")}
+  </div>
+</div>
+<div style="max-width:1100px;margin:0 auto;padding:28px 40px">
+<div class="no-print" style="display:flex;gap:10px;margin-bottom:24px">
+  <button onclick="window.print()" style="padding:9px 20px;background:#4f8ef7;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:500;font-size:13px">🖨 Print / Save PDF</button>
+  <button onclick="(function(){const b=new Blob([document.documentElement.outerHTML],{type:'text/html'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=document.body.dataset.filename||'report.html';a.click();})()" style="padding:9px 20px;background:#1a1e28;color:#6b7390;border:1px solid #252a38;border-radius:6px;cursor:pointer;font-weight:500;font-size:13px">⬇ Download .html</button>
+</div>
+${flags.length>0?`<div style="margin-bottom:20px">${flags.map(f=>`<div style="background:${f.t==="red"?"rgba(242,95,92,0.08)":"rgba(245,200,66,0.08)"};border:1px solid ${f.t==="red"?"#f25f5c":"#f5c842"};border-radius:8px;padding:10px 16px;margin-bottom:6px;color:${f.t==="red"?"#f25f5c":"#f5c842"};font-size:12px;font-weight:500">⚠ ${f.m}</div>`).join("")}</div>`:""}
+${secTitle("Limb Symmetry Index & H/Q Ratio")}
+<div class="kpi-grid no-break">
+  ${[[t.lsi_ext,lsi_ext,"%","≥90%",lsiCls(lsi_ext)],[t.lsi_flex,lsi_flex,"%","≥90%",lsiCls(lsi_flex)],[t.lsi_work,lsi_work,"%","≥90%",lsiCls(lsi_work)],[t.lsi_pwr,lsi_pwr,"%","≥90%",lsiCls(lsi_pwr)],[t.hq_right,hq_r,"%","55-65%",hqCls(hq_r)],[t.hq_left,hq_l,"%","55-65%",hqCls(hq_l)]].map(([lbl,val,u,n,cls])=>kpi(lbl,val,u,`Φυσιολ. ${n}`,cls)).join("")}
+</div>
+<div class="no-break" style="margin-bottom:20px">${secTitle(t.rts_title)}
+<div class="no-break" style="background:#13161e;border:1px solid #252a38;border-radius:12px;padding:20px 24px;margin-bottom:20px">
+  <div style="display:flex;align-items:center;gap:24px;margin-bottom:16px">
+    <div style="text-align:center"><div style="font-size:42px;font-weight:700;color:${rtsColor};font-family:'JetBrains Mono',monospace">${pct}%</div><div style="font-size:11px;color:#6b7390;margin-top:2px">${passed}/${total} ${t.rts_criteria}</div></div>
+    <div style="flex:1"><div style="font-size:14px;font-weight:600;color:${rtsColor};margin-bottom:8px">${rtsVerdict}</div><div style="background:#1a1e28;border-radius:6px;height:8px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${rtsColor};border-radius:6px"></div></div></div>
+  </div>
+  <div class="rts-checks">${checks.map(c=>`<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#1a1e28;border-radius:6px;border:1px solid ${c.pass?"rgba(62,207,142,0.2)":"rgba(242,95,92,0.15)"}"><span style="font-size:14px">${c.pass?"✅":"❌"}</span><span style="font-size:11px;color:#6b7390;flex:1">${c.label}</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:${c.pass?"#3ecf8e":"#f25f5c"};font-weight:600">${c.val}</span></div>`).join("")}</div>
+</div></div>
+${norm?`${secTitle(t.norm_title+" ("+genderStr+", 60°/s)")}<div class="norm-grid no-break">${normRows.map(([lbl,val,range])=>{const inR=val!=null&&val>=range[0]&&val<=range[1];const below=val!=null&&val<range[0];const cls=val==null?"muted":inR?"green":below?"red":"yellow";return kpi(lbl,val,"%",`Norm: ${range[0]}-${range[1]}%`,cls);}).join("")}</div>`:""}
+<div style="page-break-before:always;break-before:always"></div>
+${secTitle(t.analysis_title+" — "+latest.test_date)}
+<div style="background:#13161e;border:1px solid #252a38;border-radius:10px;overflow:hidden;margin-bottom:20px">
+<table><thead><tr><th>Παράμετρος</th><th>${t.right_ext}</th><th>${t.left_ext}</th><th>${t.deficit}</th><th>${t.right_flex}</th><th>${t.left_flex}</th><th>${t.deficit}</th></tr></thead>
+<tbody>${params.map(([lbl,key,unit])=>{const de=calcDefR(r?.[key],l?.[key]),df=calcDefR(rf?.[key],lf?.[key]);const isCov=key.includes("cov");return`<tr><td style="color:#6b7390;font-size:11px">${lbl}</td><td style="${isCov?`color:${cc[covCls(r?.[key])]}`:"color:#e8eaf0"};font-family:'JetBrains Mono',monospace">${fmt(r?.[key],unit)}</td><td style="${isCov?`color:${cc[covCls(l?.[key])]}`:"color:#e8eaf0"};font-family:'JetBrains Mono',monospace">${fmt(l?.[key],unit)}</td><td>${de!=null?badge((de>0?"+":"")+de+"%",defCls(de)):"—"}</td><td style="${isCov?`color:${cc[covCls(rf?.[key])]}`:"color:#e8eaf0"};font-family:'JetBrains Mono',monospace">${fmt(rf?.[key],unit)}</td><td style="${isCov?`color:${cc[covCls(lf?.[key])]}`:"color:#e8eaf0"};font-family:'JetBrains Mono',monospace">${fmt(lf?.[key],unit)}</td><td>${df!=null?badge((df>0?"+":"")+df+"%",defCls(df)):"—"}</td></tr>`;}).join("")}</tbody></table>
+</div>
+${sorted.length>1?`<div style="page-break-before:always;break-before:always"></div>${secTitle("Ιστορικό Μετρήσεων")}<div style="background:#13161e;border:1px solid #252a38;border-radius:10px;overflow:hidden;margin-bottom:20px"><table><thead><tr><th>${t.date}</th><th>${t.joint}</th><th>${t.protocol}</th><th>${t.speed}</th><th>${t.lsi_ext}</th><th>${t.hq_right}</th><th>${t.hq_left}</th><th>RTS</th><th>${t.notes}</th></tr></thead><tbody>${timelineRows}</tbody></table></div>`:""}
+${sorted.length>=2?`${secTitle("Σύγκριση: "+sorted[0].test_date+" → "+sorted[sorted.length-1].test_date)}<div class="compare-grid no-break">${(()=>{const an0=analyze(sorted[0].test_results||[],athlete.gender);const an1=analyze(sorted[sorted.length-1].test_results||[],athlete.gender);const delta=(a,b)=>(a!=null&&b!=null)?Math.round(((b-a)/Math.abs(a))*100):null;return[["LSI PT Εκτ.",an0.lsi_ext,an1.lsi_ext],["LSI PT Κάμπτ.",an0.lsi_flex,an1.lsi_flex],["H/Q Δεξί",an0.hq_r,an1.hq_r],["H/Q Αριστ.",an0.hq_l,an1.hq_l],["LSI Work",an0.lsi_work,an1.lsi_work],["LSI Power",an0.lsi_pwr,an1.lsi_pwr]].map(([lbl,v1,v2])=>{const d=delta(v1,v2);const cls=lsiCls(v2);return`<div style="background:#1a1e28;border:1px solid #252a38;border-radius:10px;padding:16px;text-align:center"><div style="font-size:9px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#6b7390;margin-bottom:8px">${lbl}</div><div style="display:flex;justify-content:center;gap:12px;align-items:center;margin-bottom:6px"><span style="font-family:'JetBrains Mono',monospace;font-size:14px;color:#6b7390">${v1!=null?v1+"%":"—"}</span><span style="color:#252a38">→</span><span style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;color:${cc[cls]||cc.muted}">${v2!=null?v2+"%":"—"}</span></div>${d!=null?badge((d>0?"+":"")+d+"%",d>=0?"green":"red"):""}</div>`;}).join("");})()}</div>`:""}
+${latest.examiner||latest.clinical_notes||latest.ai_interpretation||latest.rehab_program||latest.next_goals?`
+<div style="page-break-before:always;break-before:always"></div>
+${secTitle("Κλινικές Σημειώσεις & Οδηγίες")}
+${latest.examiner?`<div style="margin-bottom:12px"><span style="font-size:10px;color:#6b7390;font-weight:600">ΕΞΕΤΑΣΤΗΣ: </span><span style="font-size:12px;color:#e8eaf0">${latest.examiner}</span></div>`:""}
+${latest.clinical_notes?`<div class="clinical-section"><div style="font-size:9px;color:#6b7390;font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.08em">Σημειώσεις Εξεταστή</div><div class="clinical-text">${latest.clinical_notes}</div></div>`:""}
+${latest.ai_interpretation?`<div style="margin-bottom:16px"><div style="font-size:9px;color:#4f8ef7;font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.08em">🤖 Κλινική Ερμηνεία</div>${md2html(latest.ai_interpretation)}</div>`:""}
+${latest.rehab_program?`<div style="margin-bottom:16px"><div style="font-size:9px;color:#3ecf8e;font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.08em">📋 Πρόγραμμα Αποκατάστασης</div>${md2html(latest.rehab_program)}</div>`:""}
+${latest.next_goals?`<div class="clinical-section" style="background:rgba(62,207,142,0.06);border:1px solid rgba(62,207,142,0.2)"><div style="font-size:9px;color:#3ecf8e;font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.08em">🎯 Στόχοι Επόμενης Μέτρησης</div><div class="clinical-text">${latest.next_goals}</div></div>`:""}
+`:""}
+</div>
+<div style="background:#13161e;border-top:1px solid #252a38;padding:16px 40px;display:flex;justify-content:space-between;align-items:center;margin-top:20px">
+  <div style="font-size:11px;color:#6b7390">360 Ergometric Tests · ergometrictests.com · +357 99341202</div>
+  <div style="font-size:10px;color:#6b7390">HUMAC2015® · Cybex NORM</div>
+</div>
+</body></html>`;
+}
+
+function generateReport(athlete, meas, lang="el", allMeasurements=[]) {
+  const reportHtml = buildReportHTML(athlete, allMeasurements.length>0?allMeasurements:[meas], lang);
+  const w = window.open("","_blank");
+  w.document.write(reportHtml);
+  w.document.close();
+}
+
+// ── COMPARE VIEW ──────────────────────────────────────────────────────────────
+function CompareView({measurements}){
+  const [t1id,setT1id]=useState(measurements[1]?.id||"");
+  const [t2id,setT2id]=useState(measurements[0]?.id||"");
+  if(measurements.length<2)return html`<${Card} style=${{textAlign:"center",padding:40,color:C.muted}}><div style=${{fontSize:32,marginBottom:12}}>📈</div><div>Χρειάζονται τουλάχιστον 2 μετρήσεις.</div><//>`;
+  const t1=measurements.find(m=>m.id===t1id),t2=measurements.find(m=>m.id===t2id);
+  const gv=(m,s,g,k)=>m?.test_results?.find(r=>r.side===s&&r.muscle_group===g)?.[k];
+  const delta=(a,b)=>(a!=null&&b!=null)?Math.round(((b-a)/Math.abs(a))*100):null;
+  const an1=analyze(t1?.test_results||[]),an2=analyze(t2?.test_results||[]);
+  const prows=[["PT Εκτ. Δεξί (Nm)","right","extensors","peak_torque"],["PT Εκτ. Αριστ. (Nm)","left","extensors","peak_torque"],["PT Κάμπτ. Δεξί (Nm)","right","flexors","peak_torque"],["PT Κάμπτ. Αριστ. (Nm)","left","flexors","peak_torque"],["Work Εκτ. Δεξί (Nm)","right","extensors","work_per_rep"],["Work Κάμπτ. Δεξί (Nm)","right","flexors","work_per_rep"],["Power Εκτ. Δεξί (W)","right","extensors","avg_power"],["Power Κάμπτ. Δεξί (W)","right","flexors","avg_power"]];
+  return html`
+    <div>
+      <div style=${{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:16,marginBottom:20,alignItems:"end"}}>
+        <div><${Lbl} t="ΜΕΤΡΗΣΗ 1 (Βάση)"/><select value=${t1id} onChange=${e=>setT1id(e.target.value)}>${measurements.map(m=>html`<option key=${m.id} value=${m.id}>${m.test_date} — ${m.notes||m.protocol}</option>`)}</select></div>
+        <div style=${{textAlign:"center",color:C.border,fontSize:20,paddingBottom:8}}>→</div>
+        <div><${Lbl} t="ΜΕΤΡΗΣΗ 2 (Νεότερη)"/><select value=${t2id} onChange=${e=>setT2id(e.target.value)}>${measurements.map(m=>html`<option key=${m.id} value=${m.id}>${m.test_date} — ${m.notes||m.protocol}</option>`)}</select></div>
+      </div>
+      ${t1&&t2&&t1.gravity_corrected!==t2.gravity_corrected&&html`<div style=${{background:"rgba(245,200,66,0.08)",border:`1px solid ${C.yellow}`,borderRadius:8,padding:"10px 16px",marginBottom:16,color:C.yellow,fontSize:12}}>⚠ Διαφορά gravity correction</div>`}
+      <${Sec} t="Σύγκριση Παραμέτρων"/>
+      <${Card} style=${{padding:0,marginBottom:20}}>
+        <table><thead><tr><th>Παράμετρος</th><th>${t1?.test_date||"T1"}</th><th>${t2?.test_date||"T2"}</th><th>Μεταβολή</th></tr></thead>
+        <tbody>${prows.map(([lbl,s,g,k])=>{const v1=gv(t1,s,g,k),v2=gv(t2,s,g,k),d=delta(v1,v2);return html`<tr key=${lbl}><td class="muted" style=${{fontSize:12}}>${lbl}</td><td class="mono">${v1??"—"}</td><td class="mono">${v2??"—"}</td><td>${d!=null&&html`<${Bdg} txt=${(d>0?"+":"")+d+"%"} color=${d>=0?"green":"red"}/>`}</td></tr>`;})}</tbody></table>
+      <//>
+      <${Sec} t="LSI & H/Q — Εξέλιξη"/>
+      <div style=${{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+        ${[["LSI PT Εκτ.",an1.lsi_ext,an2.lsi_ext],["LSI PT Κάμπτ.",an1.lsi_flex,an2.lsi_flex],["H/Q Δεξί",an1.hq_r,an2.hq_r],["H/Q Αριστ.",an1.hq_l,an2.hq_l],["LSI Work",an1.lsi_work,an2.lsi_work],["LSI Power",an1.lsi_pwr,an2.lsi_pwr]].map(([lbl,v1,v2])=>{
+          const d=delta(v1,v2);
+          return html`<${Card} key=${lbl} style=${{textAlign:"center"}}>
+            <div style=${{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>${lbl}</div>
+            <div style=${{display:"flex",justifyContent:"center",gap:10,alignItems:"center"}}>
+              <span class="mono muted" style=${{fontSize:14}}>${v1??"—"}%</span>
+              <span style=${{color:C.border}}>→</span>
+              <span class=${"mono "+lsi_c(v2)} style=${{fontSize:20,fontWeight:700}}>${v2??"—"}%</span>
+            </div>
+            ${d!=null&&html`<div style=${{marginTop:6}}><${Bdg} txt=${(d>0?"+":"")+d+"%"} color=${d>=0?"green":"red"}/></div>`}
+          <//>`;
+        })}
+      </div>
+    </div>`;
+}
+
+
+
+
+// ── MULTI-SPEED SESSION INPUT ─────────────────────────────────────────────────
+function MultiSpeedInput({athlete, onSave, onCancel}) {
+  const [speeds, setSpeeds] = useState([60, 180]);
+  const [newSpeed, setNewSpeed] = useState("");
+  const [joint, setJoint] = useState("knee");
+  const [protocol, setProtocol] = useState("con_con");
+  const [testDate, setTestDate] = useState(new Date().toISOString().split("T")[0]);
+  const [gravityCorr, setGravityCorr] = useState(true);
+  const [notes, setNotes] = useState("");
+  const [mode, setMode] = useState("upload");
+  const [parsedSession, setParsedSession] = useState(null); // single PDF with all speeds
+  const [uploads, setUploads] = useState({}); // fallback: per-speed
+  const [parsing, setParsing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const addSpeed = () => {
+    const s = parseInt(newSpeed);
+    if(s && !speeds.includes(s)) { setSpeeds(p=>[...p,s].sort((a,b)=>a-b)); setNewSpeed(""); }
+  };
+  const removeSpeed = (s) => setSpeeds(p=>p.filter(x=>x!==s));
+
+  const groups = joint==="shoulder" ? ["extensors","flexors","internal_rot","external_rot"] : ["extensors","flexors"];
+  const emptyRows = () => ["right","left"].flatMap(s=>groups.map(g=>({side:s,muscle_group:g,peak_torque:"",pt_cov:"",pt_bw:"",work_per_rep:"",work_cov:"",avg_power:"",power_cov:"",joint_angle_peak:"",rom:"",rom_cov:"",time_to_peak:"",force_decay:""})));
+  const [manualData, setManualData] = useState({});
+  const getManualRows = (spd) => manualData[spd] || emptyRows();
+  const setManualVal = (spd,i,k,v) => setManualData(p=>({...p,[spd]:getManualRows(spd).map((row,idx)=>idx===i?{...row,[k]:v}:row)}));
+  const toN = v => v===""?null:+v;
+
+  const handleSessionFile = async(e) => {
+    const file = e.target.files[0]; if(!file) return;
+    setParsing(true); setError("");
+    try {
+      const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(file);});
+      // Split PDF by page and parse each separately
+      const data = await splitAndParsePDF(b64);
+      if(data.speeds?.length>0) {
+        setParsedSession(data);
+        setSpeeds(data.speeds.map(s=>s.speed_deg_s).sort((a,b)=>a-b));
+        setTestDate(data.test_date||testDate);
+        setJoint(data.joint||data.joint||joint);
+      } else {
+        throw new Error("Δεν εντοπίστηκαν δεδομένα. Δοκίμασε χειροκίνητη εισαγωγή.");
+      }
+    } catch(err) { setError("Σφάλμα: "+err.message); }
+    setParsing(false);
+  };
+
+  const handleFile = async(spd, e) => {
+    const file = e.target.files[0]; if(!file) return;
+    setParsing(true); setError("");
+    try {
+      const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(file);});
+      const data = await splitAndParsePDF(b64);
+      setUploads(p=>({...p,[spd]:data.speeds?.[0]||{results:[]}}));
+    } catch(err) { setError("Σφάλμα PDF "+spd+"°/s: "+err.message); }
+    setParsing(false);
+  };
+
+  const saveSession = async() => {
+    setSaving(true); setError("");
+    try {
+      const sessionId = crypto.randomUUID();
+      // Determine speed data source
+      const speedData = (parsedSession?.speeds?.length>0)
+        ? parsedSession.speeds
+        : speeds.map(spd=>({speed_deg_s:spd, reps:uploads[spd]?.reps||5, results:uploads[spd]?.results||[]}));
+      if(!speedData || speedData.length===0) throw new Error("Δεν βρέθηκαν δεδομένα ταχύτητας");
+
+      for(const sd of speedData) {
+        const spd = sd.speed_deg_s;
+        const results = mode==="upload"
+          ? (sd.results || [])
+          : getManualRows(spd).map(row=>Object.fromEntries(Object.entries(row).map(([k,v])=>["side","muscle_group"].includes(k)?[k,v]:[k,toN(v)])));
+        if(!results.length) continue;
+        const meas = await db.post("measurements", {
+          athlete_id:athlete.id, test_date:testDate, joint, protocol,
+          speed_deg_s:spd, reps:sd.reps||5,
+          gravity_corrected:gravityCorr, source:mode==="upload"?"pdf_upload":"manual",
+          notes:notes+(speedData.length>1?" [Multi-Speed "+speedData.map(s=>s.speed_deg_s).join("+")+"°/s]":""),
+          session_id:sessionId, raw_json:null,
+        });
+        if(!meas?.id) throw new Error("Σφάλμα αποθήκευσης "+spd+"°/s");
+        for(const row of results) {
+          const clean = {measurement_id:meas.id, speed_deg_s:spd};
+          Object.entries(row).forEach(([k,v])=>{ if(KNOWN_COLS.has(k)&&v!=null) clean[k]=v; });
+          await db.post("test_results", clean);
+        }
+      }
+      onSave();
+    } catch(err) { setError(err.message); }
+    setSaving(false);
+  };
+
+  const allUploaded = parsedSession || speeds.every(s=>uploads[s]);
+  const canSave = mode==="upload" ? !!allUploaded : true;
+
+  return html`
+    <div>
+      <div style=${{marginBottom:20}}>
+        <div style=${{fontSize:11,color:C.accent,fontWeight:600,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>Νέο Multi-Speed Session</div>
+        <div style=${{fontSize:22,fontWeight:700}}>${athlete.name}</div>
+      </div>
+      <${Card} style=${{marginBottom:16}}>
+        <${Sec} t="Ρύθμιση Session"/>
+        <div style=${{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:16}}>
+          <div><${Lbl} t="Ημερομηνία"/><input type="date" value=${testDate} onInput=${e=>setTestDate(e.target.value)}/></div>
+          <div><${Lbl} t="Άρθρωση"/><select value=${joint} onChange=${e=>setJoint(e.target.value)}>${["knee","shoulder","trunk","elbow","ankle"].map(j=>html`<option value=${j}>${j}</option>`)}</select></div>
+          <div><${Lbl} t="Πρωτόκολλο"/><select value=${protocol} onChange=${e=>setProtocol(e.target.value)}>${["con_con","con_ecc","ecc_con","isometric","isotonic"].map(p=>html`<option value=${p}>${p}</option>`)}</select></div>
+          <div style=${{display:"flex",alignItems:"center",gap:8,paddingTop:20}}>
+            <input type="checkbox" checked=${gravityCorr} onChange=${e=>setGravityCorr(e.target.checked)} style=${{width:"auto"}}/>
+            <span style=${{fontSize:12,color:C.muted}}>Gravity Correction</span>
+          </div>
+          <div style=${{gridColumn:"2/-1"}}><${Lbl} t="Σημειώσεις"/><input value=${notes} onInput=${e=>setNotes(e.target.value)} placeholder="π.χ. Post ACL-R"/></div>
+        </div>
+        <${Sec} t="Ταχύτητες (°/s)"/>
+        <div style=${{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}}>
+          ${speeds.map(s=>html`
+            <div key=${s} style=${{display:"flex",alignItems:"center",gap:6,background:C.bg3,border:`1px solid ${C.accent}`,borderRadius:20,padding:"4px 12px"}}>
+              <span style=${{fontFamily:"monospace",fontWeight:600,color:C.accent}}>${s}°/s</span>
+              <button onClick=${()=>removeSpeed(s)} style=${{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:14,lineHeight:1}}>×</button>
+            </div>
+          `)}
+          <div style=${{display:"flex",gap:6}}>
+            <input type="number" value=${newSpeed} onInput=${e=>setNewSpeed(e.target.value)} placeholder="π.χ. 300" style=${{width:90}} onKeyDown=${e=>e.key==="Enter"&&addSpeed()}/>
+            <button onClick=${addSpeed} style=${{padding:"6px 12px",background:C.bg3,color:C.accent,border:`1px solid ${C.border}`,borderRadius:6,cursor:"pointer"}}>+ Προσθήκη</button>
+          </div>
+        </div>
+        <div style=${{display:"flex",gap:6,flexWrap:"wrap"}}>
+          ${[[60],[180],[300],[60,180],[60,180,300]].map(preset=>html`
+            <button key=${preset.join("+")} onClick=${()=>setSpeeds([...preset])} style=${{padding:"4px 10px",background:C.bg3,color:C.muted,border:`1px solid ${C.border}`,borderRadius:4,cursor:"pointer",fontSize:11}}>${preset.join("+")}°/s</button>
+          `)}
+        </div>
+      <//>
+
+      <div style=${{display:"flex",gap:8,marginBottom:20,marginTop:16}}>
+        ${["upload","manual"].map(m=>html`<button key=${m} onClick=${()=>setMode(m)} style=${{padding:"8px 18px",background:mode===m?C.accent:C.bg3,color:mode===m?"white":C.muted,border:`1px solid ${mode===m?C.accent:C.border}`,borderRadius:6,cursor:"pointer"}}>${m==="upload"?"📄 Upload PDFs":"✏️ Χειροκίνητη"}</button>`)}
+      </div>
+
+      ${mode==="upload"&&html`
+        <${Card} style=${{marginBottom:16,border:`1px solid ${parsedSession?C.green:C.border}`}}>
+          <${Sec} t="Upload PDF (1 αρχείο — όλες οι ταχύτητες)"/>
+          ${!parsedSession?html`
+            <label style=${{display:"block",border:`2px dashed ${C.border}`,borderRadius:8,padding:32,textAlign:"center",cursor:"pointer",color:C.muted}}>
+              ${parsing?html`<${Sp}/><div style=${{marginTop:8}}>Ανάλυση με AI — εξαγωγή όλων των ταχυτήτων...</div>`:html`
+                <div style=${{fontSize:36}}>📄</div>
+                <div style=${{marginTop:8,fontWeight:600}}>Κλικ για επιλογή PDF</div>
+                <div style=${{fontSize:11,marginTop:4,color:C.muted}}>Cybex HUMAC NORM — 1 αρχείο με όλες τις ταχύτητες</div>
+              `}
+              <input type="file" accept=".pdf" onChange=${handleSessionFile} style=${{display:"none"}}/>
+            </label>
+          `:html`
+            <div style=${{color:C.green,fontWeight:600,marginBottom:12}}>✅ PDF αναλύθηκε — ${parsedSession.speeds?.length} ταχύτητες εντοπίστηκαν</div>
+            ${parsedSession.speeds?.map((sd,si)=>html`
+              <div key=${si} style=${{marginBottom:12,background:C.bg3,borderRadius:8,padding:"10px 14px"}}>
+                <div style=${{fontSize:13,fontWeight:700,color:C.accent,fontFamily:"monospace",marginBottom:8}}>${sd.speed_deg_s}°/s — ${sd.results?.length} αποτελέσματα</div>
+                ${sd.results?.slice(0,4).map((r,i)=>html`
+                  <div key=${i} style=${{display:"flex",gap:12,padding:"3px 0",fontSize:12,borderBottom:`1px solid ${C.border}`}}>
+                    <span style=${{textTransform:"capitalize",width:90,color:C.muted}}>${r.muscle_group}</span>
+                    <span class="muted">${r.side==="right"?"Δεξί":"Αριστ."}</span>
+                    <span class=${"mono "+(r.pt_cov>0.25?"red":r.pt_cov>0.15?"yellow":"green")}>${r.peak_torque} Nm</span>
+                    <span class="muted mono">CoV: ${r.pt_cov}</span>
+                  </div>
+                `)}
+              </div>
+            `)}
+            <button onClick=${()=>setParsedSession(null)} style=${{background:"none",color:C.red,border:"none",cursor:"pointer",fontSize:11}}>✕ Νέο PDF</button>
+          `}
+        <//>
+      `}
+
+      ${mode==="manual"&&speeds.map(spd=>html`
+        <${Card} key=${spd} style=${{marginBottom:16,border:`1px solid ${C.border}`}}>
+          <div style=${{fontSize:14,fontWeight:700,color:C.accent,fontFamily:"monospace",marginBottom:12}}>${spd}°/s</div>
+          ${getManualRows(spd).map((row,i)=>html`
+            <div key=${i} style=${{marginBottom:10}}>
+              <div style=${{fontSize:11,fontWeight:600,color:C.accent,marginBottom:6,textTransform:"uppercase"}}>${row.side==="right"?"🔴":"🔵"} ${row.muscle_group}</div>
+              <div style=${{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+                ${[["peak_torque","PT (Nm)"],["pt_cov","CoV"],["pt_bw","%BW"],["work_per_rep","Work"],["avg_power","Power"],["rom","ROM"],["joint_angle_peak","Angle"],["time_to_peak","T.Peak"]].map(([k,l])=>html`
+                  <div key=${k}>
+                    <div style=${{fontSize:9,color:C.muted,marginBottom:2}}>${l}</div>
+                    <input type="number" step="0.01" value=${row[k]} onInput=${e=>setManualVal(spd,i,k,e.target.value)} placeholder="—" style=${{fontSize:11,padding:"5px 6px"}}/>
+                  </div>
+                `)}
+              </div>
+            </div>
+          `)}
+        <//>
+      `)}
+
+      ${error&&html`<div style=${{color:C.red,marginBottom:8,fontSize:12}}>${error}</div>`}
+
+      <div style=${{display:"flex",gap:10}}>
+        <${Btn} onClick=${saveSession} disabled=${saving||!canSave} color=${C.green} textColor="#0d0f14">
+          ${saving?html`<${Sp}/>`:""}  Αποθήκευση Session (${speeds.join("+")}°/s)
+        <//>
+        <${Btn} onClick=${onCancel} color=${C.bg3} textColor=${C.muted}>Ακύρωση<//>
+      </div>
+    </div>`;
+}
+
+// ── MULTI-SPEED ANALYSIS ──────────────────────────────────────────────────────
+function MultiSpeedAnalysis({measurements, athlete}) {
+  const sessions = {};
+  measurements.forEach(m => {
+    const key = m.session_id || (m.test_date+"_"+m.joint+"_"+m.protocol);
+    if(!sessions[key]) sessions[key] = {date:m.test_date,joint:m.joint,measurements:[]};
+    sessions[key].measurements.push(m);
+  });
+  const multi = Object.values(sessions).filter(s=>s.measurements.length>1).sort((a,b)=>new Date(b.date)-new Date(a.date));
+
+  if(!multi.length) return html`
+    <${Card} style=${{textAlign:"center",padding:40,color:C.muted}}>
+      <div style=${{fontSize:32,marginBottom:12}}>⚡</div>
+      <div>Δεν υπάρχουν multi-speed sessions.</div>
+      <div style=${{fontSize:12,marginTop:8,color:C.muted}}>Χρησιμοποίησε το κουμπί "⚡ Multi-Speed" για να προσθέσεις.</div>
+    <//>`;
+
+  const [sel, setSel] = useState(0);
+  const session = multi[sel];
+  const speeds = [...session.measurements].sort((a,b)=>a.speed_deg_s-b.speed_deg_s);
+  const gv = (m,s,g,k) => m.test_results?.find(r=>r.side===s&&r.muscle_group===g)?.[k];
+
+  const rows = [
+    ["Peak Torque Εκτ. Δεξί (Nm)", m=>gv(m,"right","extensors","peak_torque"), ""],
+    ["Peak Torque Εκτ. Αριστ. (Nm)", m=>gv(m,"left","extensors","peak_torque"), ""],
+    ["Peak Torque Κάμπτ. Δεξί (Nm)", m=>gv(m,"right","flexors","peak_torque"), ""],
+    ["Peak Torque Κάμπτ. Αριστ. (Nm)", m=>gv(m,"left","flexors","peak_torque"), ""],
+    ["%BW Εκτ. Δεξί", m=>gv(m,"right","extensors","pt_bw"), "%"],
+    ["Work Εκτ. Δεξί (Nm)", m=>gv(m,"right","extensors","work_per_rep"), ""],
+    ["Power Εκτ. Δεξί (W)", m=>gv(m,"right","extensors","avg_power"), ""],
+    ["H/Q Δεξί (%)", m=>{const f=gv(m,"right","flexors","peak_torque"),e=gv(m,"right","extensors","peak_torque");return calcHQ(f,e);}, "%"],
+    ["H/Q Αριστ. (%)", m=>{const f=gv(m,"left","flexors","peak_torque"),e=gv(m,"left","extensors","peak_torque");return calcHQ(f,e);}, "%"],
+    ["LSI PT Εκτ. (%)", m=>calcLSI(gv(m,"right","extensors","peak_torque"),gv(m,"left","extensors","peak_torque")), "%"],
+  ];
+
+  return html`
+    <div>
+      ${multi.length>1&&html`
+        <div style=${{marginBottom:16}}>
+          <${Lbl} t="Επιλογή Session"/>
+          <select value=${sel} onChange=${e=>setSel(+e.target.value)}>
+            ${multi.map((s,i)=>html`<option key=${i} value=${i}>${s.date} — ${s.joint} [${s.measurements.map(m=>m.speed_deg_s).sort((a,b)=>a-b).join("+")}°/s]</option>`)}
+          </select>
+        </div>
+      `}
+
+      <${Sec} t=${"Session: "+session.date+" — "+speeds.map(m=>m.speed_deg_s).join("+")}/>
+
+      <${Card} style=${{padding:0,marginBottom:20}}>
+        <table>
+          <thead>
+            <tr>
+              <th>Παράμετρος</th>
+              ${speeds.map(m=>html`<th key=${m.speed_deg_s} style=${{textAlign:"center",color:C.accent}}>${m.speed_deg_s}°/s</th>`)}
+              ${speeds.length>1&&html`<th style=${{textAlign:"center"}}>Δ ${speeds[0].speed_deg_s}→${speeds[speeds.length-1].speed_deg_s}</th>`}
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(([lbl,fn,unit])=>{
+              const vals = speeds.map(m=>fn(m));
+              const first = vals[0], last = vals[vals.length-1];
+              const delta = (first!=null&&last!=null&&first!==0) ? Math.round(((last-first)/Math.abs(first))*100) : null;
+              const isHQ = lbl.includes("H/Q");
+              const isLSI = lbl.includes("LSI");
+              return html`
+                <tr key=${lbl}>
+                  <td class="muted" style=${{fontSize:12}}>${lbl}</td>
+                  ${vals.map((v,i)=>html`
+                    <td key=${i} class=${"mono "+(isHQ?hq_c(v):isLSI?lsi_c(v):"")} style=${{textAlign:"center",fontWeight:600}}>
+                      ${v!=null?v+unit:"—"}
+                    </td>
+                  `)}
+                  ${speeds.length>1&&html`
+                    <td style=${{textAlign:"center"}}>
+                      ${delta!=null&&html`<${Bdg} txt=${(delta>0?"+":"")+delta+"%"} color=${delta>=0?"green":"red"}/>`}
+                    </td>
+                  `}
+                </tr>`;
+            })}
+          </tbody>
+        </table>
+      <//>
+
+      <${Sec} t="LSI & H/Q ανά Ταχύτητα"/>
+      <div style=${{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:16}}>
+        ${speeds.map(m=>{
+          const an=analyze(m.test_results||[],athlete?.gender||"");
+          return html`
+            <${Card} key=${m.speed_deg_s}>
+              <div style=${{fontSize:16,fontWeight:700,color:C.accent,fontFamily:"monospace",marginBottom:12,textAlign:"center"}}>${m.speed_deg_s}°/s</div>
+              <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                ${[["LSI Εκτ.",an.lsi_ext,lsi_c(an.lsi_ext),"≥90%"],["H/Q Δεξί",an.hq_r,hq_c(an.hq_r),"55-65%"],["H/Q Αριστ.",an.hq_l,hq_c(an.hq_l),"55-65%"],["LSI Κάμπτ.",an.lsi_flex,lsi_c(an.lsi_flex),"≥90%"]].map(([lbl,val,cls,norm])=>html`
+                  <div key=${lbl} style=${{textAlign:"center",background:C.bg3,borderRadius:6,padding:"8px 4px"}}>
+                    <div style=${{fontSize:9,color:C.muted,marginBottom:3}}>${lbl}</div>
+                    <div class=${"mono "+cls} style=${{fontSize:18,fontWeight:700}}>${val!=null?val+"%":"—"}</div>
+                    <div style=${{fontSize:8,color:C.muted}}>${norm}</div>
+                  </div>
+                `)}
+              </div>
+            <//>`;
+        })}
+      </div>
+    </div>`;
+}
+
+
+// ── MEASUREMENT INPUT ─────────────────────────────────────────────────────────
+function MeasurementInput({athlete,onSave,onCancel}){
+  const [mode,setMode]=useState("upload");
+  const [parsing,setParsing]=useState(false);
+  const [parsed,setParsed]=useState(null);
+  const [saving,setSaving]=useState(false);
+  const [error,setError]=useState("");
+  const [meta,setMeta]=useState({test_date:new Date().toISOString().split("T")[0],joint:"knee",protocol:"con_con",speed_deg_s:60,reps:5,gravity_corrected:true,notes:""});
+  const sm=(k,v)=>setMeta(p=>({...p,[k]:v}));
+  const groups=meta.joint==="shoulder"?["extensors","flexors","internal_rot","external_rot"]:["extensors","flexors"];
+  const emptyRow=(s,g)=>({side:s,muscle_group:g,peak_torque:"",pt_cov:"",pt_bw:"",work_per_rep:"",work_cov:"",work_bw:"",avg_power:"",power_cov:"",power_bw:"",joint_angle_peak:"",rom:"",rom_cov:"",time_to_peak:"",force_decay:""});
+  const [rows,setRows]=useState(()=>["right","left"].flatMap(s=>groups.map(g=>emptyRow(s,g))));
+  const setVal=(i,k,v)=>setRows(r=>r.map((row,idx)=>idx===i?{...row,[k]:v}:row));
+  const toN=v=>v===""?null:+v;
+
+  const handleFile=async(e)=>{
+    const file=e.target.files[0];if(!file)return;
+    setParsing(true);setError("");
+    try{
+      const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(file);});
+      const data=await splitAndParsePDF(b64);
+      // For single measurement, use first speed
+      const firstSpeed = data.speeds?.[0]||{};
+      const normalized = {...data, results:firstSpeed.results||[], speed_deg_s:firstSpeed.speed_deg_s||60, reps:firstSpeed.reps||5};
+      setParsed(normalized);
+      setMeta(m=>({...m,test_date:data.test_date||m.test_date,joint:data.joint||m.joint,protocol:data.protocol||m.protocol,speed_deg_s:firstSpeed.speed_deg_s||m.speed_deg_s,reps:firstSpeed.reps||m.reps}));
+    }catch(err){setError("Σφάλμα: "+err.message);}
+    setParsing(false);
+  };
+
+  const saveMeas=async(results)=>{
+    setSaving(true);setError("");
+    try{
+      const meas=await db.post("measurements",{athlete_id:athlete.id,...meta,speed_deg_s:+meta.speed_deg_s,reps:+meta.reps,raw_json:parsed||null,source:mode==="upload"?"pdf_upload":"manual"});
+      if(!meas?.id)throw new Error("Δεν επιστράφηκε ID");
+      for(const row of results){
+        const clean={measurement_id:meas.id};
+        Object.entries(row).forEach(([k,v])=>{if(KNOWN_COLS.has(k)&&v!=null)clean[k]=v;});
+        await db.post("test_results",clean);
+      }
+      onSave(meas);
+    }catch(err){setError(err.message);}
+    setSaving(false);
+  };
+
+  const submitManual=()=>saveMeas(rows.map(row=>Object.fromEntries(Object.entries(row).map(([k,v])=>["side","muscle_group"].includes(k)?[k,v]:[k,toN(v)]))));
+
+  return html`
+    <div>
+      <div style=${{marginBottom:20}}><div style=${{fontSize:11,color:C.accent,fontWeight:600,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>Νέα Μέτρηση</div><div style=${{fontSize:22,fontWeight:700}}>${athlete.name}</div></div>
+      <div style=${{display:"flex",gap:8,marginBottom:20}}>
+        ${["upload","manual"].map(m=>html`<button key=${m} onClick=${()=>setMode(m)} style=${{padding:"8px 18px",background:mode===m?C.accent:C.bg3,color:mode===m?"white":C.muted,border:`1px solid ${mode===m?C.accent:C.border}`,borderRadius:6,cursor:"pointer"}}>${m==="upload"?"📄 Upload PDF":"✏️ Χειροκίνητη"}</button>`)}
+      </div>
+      <${Card} style=${{marginBottom:16}}>
+        <${Sec} t="Στοιχεία Μέτρησης"/>
+        <div style=${{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+          <div><${Lbl} t="Ημερομηνία"/><input type="date" value=${meta.test_date} onInput=${e=>sm("test_date",e.target.value)}/></div>
+          <div><${Lbl} t="Άρθρωση"/><select value=${meta.joint} onChange=${e=>sm("joint",e.target.value)}>${["knee","shoulder","trunk","elbow","ankle"].map(j=>html`<option value=${j}>${j}</option>`)}</select></div>
+          <div><${Lbl} t="Πρωτόκολλο"/><select value=${meta.protocol} onChange=${e=>sm("protocol",e.target.value)}>${["con_con","con_ecc","ecc_con","isometric","isotonic"].map(p=>html`<option value=${p}>${p}</option>`)}</select></div>
+          <div><${Lbl} t="Ταχύτητα (°/s)"/><input type="number" value=${meta.speed_deg_s} onInput=${e=>sm("speed_deg_s",e.target.value)}/></div>
+          <div><${Lbl} t="Reps"/><input type="number" value=${meta.reps} onInput=${e=>sm("reps",e.target.value)}/></div>
+          <div style=${{display:"flex",alignItems:"center",gap:8,paddingTop:20}}><input type="checkbox" checked=${meta.gravity_corrected} onChange=${e=>sm("gravity_corrected",e.target.checked)} style=${{width:"auto"}}/><span style=${{fontSize:12,color:C.muted}}>Gravity Correction</span></div>
+          <div style=${{gridColumn:"1/-1"}}><${Lbl} t="Σημειώσεις"/><input value=${meta.notes} onInput=${e=>sm("notes",e.target.value)} placeholder="π.χ. Post ACL-R 6 μήνες"/></div>
+        </div>
+      <//>
+      ${mode==="upload"?html`
+        <${Card}>
+          <${Sec} t="Upload PDF Cybex HUMAC"/>
+          ${!parsed?html`
+            <div>
+              <label style=${{display:"block",border:`2px dashed ${C.border}`,borderRadius:8,padding:32,textAlign:"center",cursor:"pointer",color:C.muted}}>
+                ${parsing?html`<${Sp}/><div style=${{marginTop:8}}>Ανάλυση με AI...</div>`:html`<div style=${{fontSize:36}}>📄</div><div style=${{marginTop:8}}>Κλικ για επιλογή PDF</div><div style=${{fontSize:11,marginTop:4}}>Cybex HUMAC NORM</div>`}
+                <input type="file" accept=".pdf" onChange=${handleFile} style=${{display:"none"}}/>
+              </label>
+              ${error&&html`<div style=${{color:C.red,marginTop:8,fontSize:12}}>${error}</div>`}
+            </div>
+          `:html`
+            <div>
+              <div style=${{color:C.green,marginBottom:16,fontWeight:600}}>✅ PDF αναλύθηκε — ${parsed.results?.length} αποτελέσματα</div>
+              <${Card} style=${{background:C.bg3,padding:0,marginBottom:16}}>
+                <table><thead><tr><th>Ομάδα</th><th>Πλευρά</th><th>Peak Torque</th><th>CoV</th><th>%BW</th><th>Work</th><th>Power</th></tr></thead>
+                <tbody>${parsed.results?.map((r,i)=>html`<tr key=${i}><td style=${{textTransform:"capitalize"}}>${r.muscle_group}</td><td class="muted">${r.side==="right"?"Δεξί":"Αριστ."}</td><td class=${"mono "+(r.pt_cov>0.25?"red":r.pt_cov>0.15?"yellow":"green")}>${r.peak_torque} Nm</td><td><${Bdg} txt=${r.pt_cov} color=${cov_c(r.pt_cov)}/></td><td class="mono muted">${r.pt_bw}%</td><td class="mono">${r.work_per_rep}</td><td class="mono">${r.avg_power}</td></tr>`)}</tbody></table>
+              <//>
+              ${error&&html`<div style=${{color:C.red,marginBottom:8,fontSize:12}}>${error}</div>`}
+              <div style=${{display:"flex",gap:10}}>
+                <${Btn} onClick=${()=>saveMeas(parsed.results)} disabled=${saving} color=${C.green} textColor="#0d0f14">${saving?html`<${Sp}/>`:""} Αποθήκευση<//>
+                <${Btn} onClick=${()=>setParsed(null)} color=${C.bg3} textColor=${C.muted}>Νέο PDF<//>
+                <${Btn} onClick=${onCancel} color=${C.bg3} textColor=${C.muted}>Ακύρωση<//>
+              </div>
+            </div>
+          `}
+        <//>
+      `:html`
+        <div>
+          ${rows.map((row,i)=>html`
+            <${Card} key=${i} style=${{marginBottom:12}}>
+              <div style=${{fontSize:12,fontWeight:600,color:C.accent,marginBottom:12,textTransform:"uppercase"}}>${row.side==="right"?"🔴 Δεξί":"🔵 Αριστερό"} — ${row.muscle_group}</div>
+              <div style=${{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+                ${[["peak_torque","Peak Torque (Nm)"],["pt_cov","CoV PT"],["pt_bw","%BW"],["work_per_rep","Work (Nm)"],["work_cov","CoV Work"],["avg_power","Power (W)"],["power_cov","CoV Power"],["joint_angle_peak","Angle (°)"],["rom","ROM (°)"],["rom_cov","CoV ROM"],["time_to_peak","Time Peak (s)"],["force_decay","Force Decay (s)"]].map(([k,l])=>html`<div key=${k}><${Lbl} t=${l}/><input type="number" step="0.01" value=${row[k]} onInput=${e=>setVal(i,k,e.target.value)} placeholder="—"/></div>`)}
+              </div>
+            <//>
+          `)}
+          ${error&&html`<div style=${{color:C.red,marginBottom:8,fontSize:12}}>${error}</div>`}
+          <div style=${{display:"flex",gap:10}}>
+            <${Btn} onClick=${submitManual} disabled=${saving} color=${C.green} textColor="#0d0f14">${saving?html`<${Sp}/>`:""} Αποθήκευση<//>
+            <${Btn} onClick=${onCancel} color=${C.bg3} textColor=${C.muted}>Ακύρωση<//>
+          </div>
+        </div>
+      `}
+    </div>`;
+}
+
+
+// ── CLINICAL NOTES EDITOR ─────────────────────────────────────────────────────
+function ClinicalNotesEditor({meas, athlete, an, onSaved, showToast}) {
+  const [notes, setNotes] = useState(meas.clinical_notes||"");
+  const [interp, setInterp] = useState(meas.ai_interpretation||"");
+  const [rehab, setRehab] = useState(meas.rehab_program||"");
+  const [goals, setGoals] = useState(meas.next_goals||"");
+  const [examiner, setExaminer] = useState(meas.examiner||"");
+  const [lang, setLang] = useState("el");
+  const [genLoading, setGenLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const genInterpretation = async() => {
+    setGenLoading(true);
+    try {
+      const text = await generateInterpretation(athlete, meas, an, lang);
+      setInterp(text);
+    } catch(e) { showToast("Σφάλμα AI: "+e.message, "error"); }
+    setGenLoading(false);
+  };
+
+  const genRehab = () => setRehab(generateRehabTemplate(an, lang));
+
+  const save = async() => {
+    setSaving(true);
+    try {
+      await db.patch("measurements", meas.id, {
+        clinical_notes: notes,
+        ai_interpretation: interp,
+        rehab_program: rehab,
+        next_goals: goals,
+        examiner,
+      });
+      showToast("Αποθηκεύτηκε ✅");
+      if(onSaved) onSaved({...meas, clinical_notes:notes, ai_interpretation:interp, rehab_program:rehab, next_goals:goals, examiner});
+    } catch(e) { showToast(e.message, "error"); }
+    setSaving(false);
+  };
+
+  return html`
+    <div>
+      <${Sec} t="Κλινικές Σημειώσεις & Οδηγίες"/>
+
+      <div style=${{display:"flex",gap:8,marginBottom:16,alignItems:"center"}}>
+        <select value=${lang} onChange=${e=>setLang(e.target.value)} style=${{width:"auto",padding:"6px 12px"}}>
+          <option value="el">🇬🇷 Ελληνικά</option>
+          <option value="en">🇬🇧 English</option>
+        </select>
+        <${Btn} onClick=${genInterpretation} disabled=${genLoading} color=${C.accent} style=${{fontSize:12}}>
+          ${genLoading?html`<${Sp}/> Παράγεται...`:"🤖 AI Ερμηνεία"}
+        <//>
+        <${Btn} onClick=${genRehab} color=${"#1a5c3a"} style=${{fontSize:12}}>📋 Πρόγραμμα Template<//>
+        <${Btn} onClick=${save} disabled=${saving} color=${C.green} textColor="#0d0f14" style=${{marginLeft:"auto"}}>
+          ${saving?html`<${Sp}/>`:"💾 Αποθήκευση"}
+        <//>
+      </div>
+
+      <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+        <div>
+          <${Lbl} t="Εξεταστής"/>
+          <input value=${examiner} onInput=${e=>setExaminer(e.target.value)} placeholder="Όνομα εξεταστή" style=${{marginBottom:12}}/>
+          <${Lbl} t="Σημειώσεις Εξεταστή"/>
+          <textarea value=${notes} onInput=${e=>setNotes(e.target.value)} rows=5 placeholder="Παρατηρήσεις κατά τη μέτρηση, συνεργασία αθλητή, πόνος, apprehension..."/>
+        </div>
+        <div>
+          <${Lbl} t="Στόχοι Επόμενης Μέτρησης"/>
+          <textarea value=${goals} onInput=${e=>setGoals(e.target.value)} rows=5 placeholder="π.χ. LSI ≥90%, H/Q ≥60%, CMJ ≥40cm — επανέλεγχος σε 8 εβδομάδες"/>
+        </div>
+      </div>
+
+      <div style=${{marginTop:16}}>
+        <${Lbl} t="Κλινική Ερμηνεία (AI-generated, editable)"/>
+        <div style=${{position:"relative"}}>
+          <textarea value=${interp} onInput=${e=>setInterp(e.target.value)} rows=10
+            placeholder="Πάτα '🤖 AI Ερμηνεία' για αυτόματη δημιουργία, ή γράψε χειροκίνητα..."
+            style=${{fontFamily:"Inter,sans-serif",lineHeight:1.6}}/>
+          ${genLoading&&html`
+            <div style=${{position:"absolute",top:0,left:0,right:0,bottom:0,background:"rgba(13,15,20,0.8)",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:6}}>
+              <${Sp}/> <span style=${{marginLeft:10,color:C.accent}}>Παράγεται ερμηνεία...</span>
+            </div>
+          `}
+        </div>
+      </div>
+
+      <div style=${{marginTop:16}}>
+        <${Lbl} t="Πρόγραμμα Αποκατάστασης (editable)"/>
+        <textarea value=${rehab} onInput=${e=>setRehab(e.target.value)} rows=12
+          placeholder="Πάτα '📋 Πρόγραμμα Template' για αυτόματο πρόγραμμα βάσει αποτελεσμάτων..."
+          style=${{fontFamily:"monospace",fontSize:12,lineHeight:1.7}}/>
+      </div>
+
+      <div style=${{display:"flex",justifyContent:"flex-end",marginTop:12}}>
+        <${Btn} onClick=${save} disabled=${saving} color=${C.green} textColor="#0d0f14">
+          ${saving?html`<${Sp}/>`:"💾 Αποθήκευση Σημειώσεων"}
+        <//>
+      </div>
+    </div>
+  `;
+}
+
+// ── ADMIN: MANAGE TEAMS & SPORTS ──────────────────────────────────────────────
+function AdminPanel({onClose, showToast}) {
+  const [tab, setTab] = useState("teams");
+  const [teams, setTeams] = useState([]);
+  const [sports, setSports] = useState([]);
+  const [teamSportsMap, setTeamSportsMap] = useState({}); // {team_id: [sport_id,...]}
+  const [newTeam, setNewTeam] = useState("");
+  const [newSport, setNewSport] = useState("");
+  const [expandedTeam, setExpandedTeam] = useState(null);
+  const [users, setUsers] = useState([]);
+  const [expandedUser, setExpandedUser] = useState(null);
+  const [userTeamAccess, setUserTeamAccess] = useState({}); // {user_id: [team_id,...]}
+  const [loading, setLoading] = useState(true);
+
+  useEffect(()=>{
+    Promise.all([
+      db.get("teams","&order=name.asc"),
+      db.get("sports","&order=name.asc"),
+      db.get("team_sports",""),
+      db.get("app_users","&order=full_name.asc"),
+      db.get("user_team_access",""),
+    ]).then(([t,s,ts,u,uta])=>{
+      setTeams(t||[]); setSports(s||[]); _teams=t||[]; _sports=s||[];
+      setUsers(u||[]);
+      // Build team_sports map
+      const tsMap = {};
+      (ts||[]).forEach(r=>{ if(!tsMap[r.team_id]) tsMap[r.team_id]=[]; tsMap[r.team_id].push(r.sport_id); });
+      setTeamSportsMap(tsMap);
+      // Build user_team_access map
+      const utaMap = {};
+      (uta||[]).forEach(r=>{ if(!utaMap[r.user_id]) utaMap[r.user_id]=[]; utaMap[r.user_id].push(r.team_id); });
+      setUserTeamAccess(utaMap);
+      setLoading(false);
+    });
+  },[]);
+
+  const updateUserRole = async(userId, role) => {
+    try {
+      await db.patch("app_users", userId, {role});
+      setUsers(u=>u.map(x=>x.id===userId?{...x,role}:x));
+      showToast("Role ενημερώθηκε");
+    } catch(e) { showToast(e.message,"error"); }
+  };
+
+  const toggleUserTeam = async(userId, teamId) => {
+    const current = userTeamAccess[userId]||[];
+    const has = current.includes(teamId);
+    try {
+      if(has) {
+        await fetch(`${SB_URL}/rest/v1/user_team_access?user_id=eq.${userId}&team_id=eq.${teamId}`,
+          {method:"DELETE",headers:{...dbH(),Prefer:""}});
+        setUserTeamAccess(m=>({...m,[userId]:current.filter(t=>t!==teamId)}));
+      } else {
+        await db.post("user_team_access",{user_id:userId,team_id:teamId,can_edit:false});
+        setUserTeamAccess(m=>({...m,[userId]:[...current,teamId]}));
+      }
+      showToast(has?"Πρόσβαση αφαιρέθηκε":"Πρόσβαση προστέθηκε");
+    } catch(e) { showToast(e.message,"error"); }
+  };
+
+  const addTeam = async() => {
+    if(!newTeam.trim()) return;
+    const t = await db.post("teams",{name:newTeam.trim()});
+    setTeams(p=>[...p,t].sort((a,b)=>a.name.localeCompare(b.name)));
+    _teams = [..._teams,t];
+    setNewTeam(""); showToast("Ομάδα προστέθηκε");
+    setExpandedTeam(t.id); // Auto-expand to add sports
+  };
+
+  const addSport = async() => {
+    if(!newSport.trim()) return;
+    const s = await db.post("sports",{name:newSport.trim()});
+    setSports(p=>[...p,s].sort((a,b)=>a.name.localeCompare(b.name)));
+    _sports = [..._sports,s];
+    setNewSport(""); showToast("Άθλημα προστέθηκε");
+  };
+
+  const delTeam = async(id) => {
+    if(!confirm("Διαγραφή ομάδας;")) return;
+    await db.del("teams",id);
+    setTeams(p=>p.filter(x=>x.id!==id));
+    _teams = _teams.filter(x=>x.id!==id);
+  };
+
+  const delSport = async(id) => {
+    if(!confirm("Διαγραφή αθλήματος;")) return;
+    await db.del("sports",id);
+    setSports(p=>p.filter(x=>x.id!==id));
+    _sports = _sports.filter(x=>x.id!==id);
+  };
+
+  const toggleTeamSport = async(teamId, sportId) => {
+    const current = teamSportsMap[teamId]||[];
+    const has = current.includes(sportId);
+    try {
+      if(has) {
+        // Remove
+        await fetch(`${SB_URL}/rest/v1/team_sports?team_id=eq.${teamId}&sport_id=eq.${sportId}`,
+          {method:"DELETE",headers:{...dbH(),Prefer:""}});
+        setTeamSportsMap(m=>({...m,[teamId]:current.filter(s=>s!==sportId)}));
+      } else {
+        // Add
+        await db.post("team_sports",{team_id:teamId,sport_id:sportId});
+        setTeamSportsMap(m=>({...m,[teamId]:[...current,sportId]}));
+      }
+    } catch(e){ showToast(e.message,"error"); }
+  };
+
+  return html`
+    <div style=${{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick=${e=>e.target===e.currentTarget&&onClose()}>
+      <div style=${{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:12,padding:28,width:620,maxHeight:"85vh",overflow:"auto"}}>
+        <div style=${{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+          <div style=${{fontSize:16,fontWeight:700}}>⚙️ Διαχείριση</div>
+          <button onClick=${onClose} style=${{background:"none",border:"none",color:C.muted,fontSize:20,cursor:"pointer"}}>×</button>
+        </div>
+        <div style=${{display:"flex",gap:8,marginBottom:20,flexWrap:"wrap"}}>
+          ${[["teams","🏆 Ομάδες"],["sports","⚽ Αθλήματα"],["users","👥 Χρήστες"]].map(([v,l])=>html`
+            <button key=${v} onClick=${()=>setTab(v)} style=${{padding:"7px 16px",background:tab===v?C.accent:C.bg3,color:tab===v?"white":C.muted,border:"none",borderRadius:6,cursor:"pointer",fontWeight:tab===v?600:400}}>${l}</button>
+          `)}
+        </div>
+
+        ${loading?html`<${Sp}/>`:tab==="teams"?html`
+          <div>
+            <div style=${{display:"flex",gap:8,marginBottom:16}}>
+              <input value=${newTeam} onInput=${e=>setNewTeam(e.target.value)} placeholder="Νέα ομάδα..." onKeyDown=${e=>e.key==="Enter"&&addTeam()}/>
+              <${Btn} onClick=${addTeam} style=${{whiteSpace:"nowrap"}}>+ Προσθήκη<//>
+            </div>
+            ${teams.map(t=>html`
+              <div key=${t.id} style=${{background:C.bg3,borderRadius:8,marginBottom:8,overflow:"hidden",border:`1px solid ${expandedTeam===t.id?C.accent:C.border}`}}>
+                <div style=${{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",cursor:"pointer"}} onClick=${()=>setExpandedTeam(expandedTeam===t.id?null:t.id)}>
+                  <div>
+                    <span style=${{fontWeight:600}}>${t.name}</span>
+                    <span style=${{fontSize:11,color:C.muted,marginLeft:8}}>
+                      ${(teamSportsMap[t.id]||[]).length} αθλήματα
+                    </span>
+                  </div>
+                  <div style=${{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style=${{color:C.accent,fontSize:12}}>${expandedTeam===t.id?"▲ Κλείσιμο":"▼ Αθλήματα"}</span>
+                    <button onClick=${e=>{e.stopPropagation();delTeam(t.id);}} style=${{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>
+                  </div>
+                </div>
+                ${expandedTeam===t.id&&html`
+                  <div style=${{padding:"10px 14px",borderTop:`1px solid ${C.border}`}}>
+                    <div style=${{fontSize:11,color:C.muted,marginBottom:8}}>Επίλεξε αθλήματα για αυτή την ομάδα:</div>
+                    <div style=${{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+                      ${sports.map(s=>{
+                        const active=(teamSportsMap[t.id]||[]).includes(s.id);
+                        return html`
+                          <div key=${s.id} onClick=${()=>toggleTeamSport(t.id,s.id)}
+                            style=${{padding:"6px 10px",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:active?600:400,
+                              background:active?"rgba(79,142,247,0.15)":C.bg2,
+                              border:`1px solid ${active?C.accent:C.border}`,
+                              color:active?C.accent:C.muted,
+                              display:"flex",alignItems:"center",gap:6}}>
+                            <span>${active?"✅":"○"}</span>
+                            <span>${s.name}</span>
+                          </div>`;
+                      })}
+                    </div>
+                  </div>
+                `}
+              </div>
+            `)}
+          </div>
+        `:tab==="sports"?html`
+          <div>
+            <div style=${{display:"flex",gap:8,marginBottom:16}}>
+              <input value=${newSport} onInput=${e=>setNewSport(e.target.value)} placeholder="Νέο άθλημα..." onKeyDown=${e=>e.key==="Enter"&&addSport()}/>
+              <${Btn} onClick=${addSport} style=${{whiteSpace:"nowrap"}}>+ Προσθήκη<//>
+            </div>
+            ${sports.map(s=>html`
+              <div key=${s.id} style=${{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",background:C.bg3,borderRadius:6,marginBottom:6}}>
+                <span>${s.name}</span>
+                <button onClick=${()=>delSport(s.id)} style=${{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:16}}>🗑</button>
+              </div>
+            `)}
+          </div>
+        `:tab==="users"?html`
+          <div>
+            <div style=${{fontSize:11,color:C.muted,marginBottom:16}}>Διαχείριση χρηστών, roles και πρόσβαση σε ομάδες.</div>
+            ${users.length===0?html`<div style=${{textAlign:"center",padding:20,color:C.muted}}>Δεν υπάρχουν χρήστες.</div>`:
+              users.map(u=>html`
+                <div key=${u.id} style=${{background:C.bg3,borderRadius:8,marginBottom:8,border:`1px solid ${expandedUser===u.id?C.accent:C.border}`}}>
+                  <div style=${{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",cursor:"pointer"}} onClick=${()=>setExpandedUser(expandedUser===u.id?null:u.id)}>
+                    <div style=${{display:"flex",alignItems:"center",gap:10}}>
+                      <div style=${{width:30,height:30,background:C.accent,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:700,color:"white"}}>${u.full_name?.[0]||"?"}</div>
+                      <div><div style=${{fontWeight:600,fontSize:13}}>${u.full_name||"—"}</div><div style=${{fontSize:11,color:C.muted}}>${u.email||"—"}</div></div>
+                    </div>
+                    <div style=${{display:"flex",alignItems:"center",gap:8}}>
+                      <span style=${{background:u.role==="admin"?"rgba(242,95,92,0.15)":u.role==="coach"?"rgba(79,142,247,0.15)":u.role==="trainer"?"rgba(245,200,66,0.15)":"rgba(62,207,142,0.15)",color:u.role==="admin"?C.red:u.role==="coach"?C.accent:u.role==="trainer"?C.yellow:C.green,padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:600}}>${u.role||"—"}</span>
+                      <span style=${{color:C.accent,fontSize:11}}>${expandedUser===u.id?"▲":"▼"}</span>
+                    </div>
+                  </div>
+                  ${expandedUser===u.id&&html`
+                    <div style=${{padding:"12px 14px",borderTop:`1px solid ${C.border}`}}>
+                      <div style=${{marginBottom:12}}>
+                        <div style=${{fontSize:10,color:C.muted,fontWeight:700,marginBottom:6,textTransform:"uppercase"}}>Role</div>
+                        <div style=${{display:"flex",gap:6,flexWrap:"wrap"}}>
+                          ${u.role?.includes("_pending")&&html`
+                            <div style=${{background:"rgba(245,200,66,0.1)",border:"1px solid #f5c842",borderRadius:6,padding:"8px 12px",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                              <span style=${{fontSize:11,color:C.yellow}}>⏳ Εκκρεμεί έγκριση ως ${u.role.replace("_pending","")}</span>
+                              <button onClick=${()=>updateUserRole(u.id,u.role.replace("_pending",""))} style=${{padding:"4px 12px",background:"#3ecf8e",color:"#0d0f14",border:"none",borderRadius:4,cursor:"pointer",fontSize:11,fontWeight:700}}>✅ Έγκριση</button>
+                            </div>
+                          `}
+                          ${["admin","coach","trainer","athlete"].map(role=>html`
+                            <button key=${role} onClick=${()=>updateUserRole(u.id,role)} style=${{padding:"5px 12px",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:u.role===role?700:400,background:u.role===role?(role==="admin"?"rgba(242,95,92,0.2)":role==="coach"?"rgba(79,142,247,0.2)":role==="trainer"?"rgba(245,200,66,0.2)":"rgba(62,207,142,0.2)"):C.bg2,color:u.role===role?(role==="admin"?C.red:role==="coach"?C.accent:role==="trainer"?C.yellow:C.green):C.muted,border:`1px solid ${u.role===role?(role==="admin"?C.red:role==="coach"?C.accent:role==="trainer"?C.yellow:C.green):C.border}`}}>
+                              ${role==="admin"?"👑 Admin":role==="coach"?"🎯 Προπονητής":role==="trainer"?"💪 Γυμναστής":"🏃 Αθλητής"}
+                            </button>
+                          `)}
+                        </div>
+                      </div>
+                      ${(u.role==="coach"||u.role==="trainer")&&html`
+                        <div>
+                          <div style=${{fontSize:10,color:C.muted,fontWeight:700,marginBottom:6,textTransform:"uppercase"}}>Πρόσβαση σε Ομάδες</div>
+                          <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                            ${teams.map(t=>{
+                              const has=(userTeamAccess[u.id]||[]).includes(t.id);
+                              return html`<div key=${t.id} onClick=${()=>toggleUserTeam(u.id,t.id)} style=${{padding:"7px 10px",borderRadius:6,cursor:"pointer",background:has?"rgba(79,142,247,0.12)":C.bg2,border:`1px solid ${has?C.accent:C.border}`,display:"flex",alignItems:"center",gap:6}}>
+                                <span>${has?"✅":"○"}</span>
+                                <span style=${{fontSize:12,color:has?C.accent:C.muted,fontWeight:has?600:400}}>${t.name}</span>
+                              </div>`;
+                            })}
+                          </div>
+                        </div>
+                      `}
+                      ${u.role==="athlete"&&html`
+                        <div style=${{fontSize:11,color:C.muted}}>ℹ Βλέπει μόνο το δικό του profile. ${u.athlete_id?html`<span style=${{color:C.green}}>✅ Matched.</span>`:html`<span style=${{color:C.yellow}}>⚠ Χωρίς match.</span>`}</div>
+                      `}
+                    </div>
+                  `}
+                </div>
+              `)
+            }
+          </div>
+        `:null}
+      </div>
+    </div>`;
+}
+
+// ── ATHLETE FORM ──────────────────────────────────────────────────────────────
+function AthleteForm({athlete,onSave,onCancel}){
+  const [f,setF]=useState(athlete||{name:"",dob:"",gender:"",weight_kg:"",height_cm:"",sport:"",notes:"",id_number:"",team_id:"",sport_id:"",dominant_side:"",athlete_level:"",injury_history:"",surgeries:"",medications:"",physician:""});
+  const [sports,setSports]=useState(_sports);
+  const [teams,setTeams]=useState(_teams);
+  useEffect(()=>{
+    if(!_sports.length) db.get("sports","&order=name.asc").then(d=>{setSports(d||[]);_sports=d||[];});
+    else setSports(_sports);
+    if(!_teams.length) db.get("teams","&order=name.asc").then(d=>{setTeams(d||[]);_teams=d||[];});
+    else setTeams(_teams);
+  },[]);
+  const [saving,setSaving]=useState(false);
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));
+  const save=async()=>{
+    if(!f.name)return;setSaving(true);
+    try{const p={...f,weight_kg:+f.weight_kg||null,height_cm:+f.height_cm||null};const result=athlete?.id?await db.patch("athletes",athlete.id,p):await db.post("athletes",p);onSave(result||p);}
+    catch(e){alert(e.message);}setSaving(false);
+  };
+  return html`
+    <div>
+      <div style=${{marginBottom:20}}><div style=${{fontSize:11,color:C.accent,fontWeight:600,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>${athlete?"Επεξεργασία":"Νέος Αθλητής"}</div><div style=${{fontSize:22,fontWeight:700}}>${f.name||"Αθλητής"}</div></div>
+      <${Card}>
+        <div style=${{fontSize:11,color:C.accent,fontWeight:600,textTransform:"uppercase",marginBottom:8}}>Βασικά Στοιχεία</div>
+        <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+          <div style=${{gridColumn:"1/-1"}}><${Lbl} t="Ονοματεπώνυμο *"/><input value=${f.name} onInput=${e=>set("name",e.target.value)} placeholder="π.χ. Παπαδόπουλος Γιώργος"/></div>
+          <div><${Lbl} t="Αρ. Ταυτότητας"/><input value=${f.id_number} onInput=${e=>set("id_number",e.target.value)} placeholder="π.χ. ΑΒ123456"/></div>
+          <div><${Lbl} t="Ημ. Γέννησης"/><input type="date" value=${f.dob} onInput=${e=>set("dob",e.target.value)}/></div>
+          <div><${Lbl} t="Φύλο"/><select value=${f.gender} onChange=${e=>set("gender",e.target.value)}><option value="">—</option><option value="male">Άνδρας</option><option value="female">Γυναίκα</option></select></div>
+          <div><${Lbl} t="Κυρίαρχο Σκέλος"/><select value=${f.dominant_side} onChange=${e=>set("dominant_side",e.target.value)}><option value="">—</option><option value="right">Δεξί</option><option value="left">Αριστερό</option></select></div>
+          <div><${Lbl} t="Βάρος (kg)"/><input type="number" value=${f.weight_kg} onInput=${e=>set("weight_kg",e.target.value)}/></div>
+          <div><${Lbl} t="Ύψος (cm)"/><input type="number" value=${f.height_cm} onInput=${e=>set("height_cm",e.target.value)}/></div>
+          <div><${Lbl} t="Επίπεδο"/><select value=${f.athlete_level} onChange=${e=>set("athlete_level",e.target.value)}><option value="">—</option><option value="elite">Elite</option><option value="semi_pro">Ημι-επαγγελματίας</option><option value="amateur">Ερασιτέχνης</option><option value="recreational">Ψυχαγωγικός</option></select></div>
+        </div>
+        <div style=${{fontSize:11,color:C.accent,fontWeight:600,textTransform:"uppercase",marginBottom:8}}>Ομάδα & Άθλημα</div>
+        <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+          <div><${Lbl} t="Ομάδα"/>
+            <select value=${f.team_id} onChange=${e=>set("team_id",e.target.value)}>
+              <option value="">— Χωρίς ομάδα —</option>
+              ${teams.map(t=>html`<option key=${t.id} value=${t.id}>${t.name}</option>`)}
+            </select>
+          </div>
+          <div><${Lbl} t="Άθλημα"/>
+            <select value=${f.sport_id} onChange=${e=>{ set("sport_id",e.target.value); const s=sports.find(x=>x.id===e.target.value); if(s) set("sport",s.name); }}>
+              <option value="">— Επιλογή —</option>
+              ${sports.map(s=>html`<option key=${s.id} value=${s.id}>${s.name}</option>`)}
+            </select>
+          </div>
+          <div><${Lbl} t="Ιατρός / Φυσιοθεραπευτής"/><input value=${f.physician} onInput=${e=>set("physician",e.target.value)} placeholder="Όνομα ιατρού"/></div>
+        </div>
+        <div style=${{fontSize:11,color:C.accent,fontWeight:600,textTransform:"uppercase",marginBottom:8}}>Ιατρικό Ιστορικό</div>
+        <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+          <div style=${{gridColumn:"1/-1"}}><${Lbl} t="Ιστορικό Τραυματισμών"/><textarea value=${f.injury_history} onInput=${e=>set("injury_history",e.target.value)} rows=3 placeholder="π.χ. Ρήξη ΠΧΣ δεξί 2023, Θλάση ισχιοκνημιαίων 2022..."/></div>
+          <div style=${{gridColumn:"1/-1"}}><${Lbl} t="Εγχειρήσεις"/><textarea value=${f.surgeries} onInput=${e=>set("surgeries",e.target.value)} rows=2 placeholder="π.χ. Ανακατασκευή ΠΧΣ δεξί 03/2023 (Hamstring graft)..."/></div>
+          <div style=${{gridColumn:"1/-1"}}><${Lbl} t="Φαρμακευτική Αγωγή"/><input value=${f.medications} onInput=${e=>set("medications",e.target.value)} placeholder="π.χ. Βιταμίνη D3, Κολλαγόνο..."/></div>
+          <div style=${{gridColumn:"1/-1"}}><${Lbl} t="Σημειώσεις"/><textarea value=${f.notes} onInput=${e=>set("notes",e.target.value)} rows=2 placeholder="Γενικές παρατηρήσεις..."/></div>
+        </div>
+        <div style=${{display:"flex",gap:10,marginTop:16}}>
+          <${Btn} onClick=${save} disabled=${saving}>${saving?html`<${Sp}/>`:""} Αποθήκευση<//>
+          <${Btn} onClick=${onCancel} color=${C.bg3} textColor=${C.muted}>Ακύρωση<//>
+        </div>
+      <//>
+    </div>`;
+}
+
+
+// ── LOGIN PAGE ────────────────────────────────────────────────────────────────
+function LoginPage({onLogin}) {
+  const [tab, setTab] = useState("login");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  // Login state
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  // Register state
+  const [rFirstName, setRFirstName] = useState("");
+  const [rLastName, setRLastName] = useState("");
+  const [rEmail, setREmail] = useState("");
+  const [rPassword, setRPassword] = useState("");
+  const [rPassword2, setRPassword2] = useState("");
+  const [rIdNumber, setRIdNumber] = useState("");
+  const [rDob, setRDob] = useState("");
+  const [rTeamId, setRTeamId] = useState("");
+  const [rSportId, setRSportId] = useState("");
+  const [rPhone, setRPhone] = useState("");
+  const [rRole, setRRole] = useState("athlete");
+  const [teams, setTeams] = useState([]);
+  const [sports, setSports] = useState([]);
+  const [teamSports, setTeamSports] = useState([]);
+
+  useEffect(()=>{
+    db.get("teams","&order=name.asc").then(d=>setTeams(d||[]));
+    db.get("sports","&order=name.asc").then(d=>setSports(d||[]));
+  },[]);
+
+  // When team changes, filter sports
+  const handleTeamChange = async(teamId) => {
+    setRTeamId(teamId);
+    setRSportId("");
+    if(!teamId) { setTeamSports([]); return; }
+    try {
+      const ts = await db.get("team_sports",`&team_id=eq.${teamId}`);
+      setTeamSports(ts||[]);
+    } catch(e) { setTeamSports([]); }
+  };
+
+  const filteredSports = rTeamId
+    ? sports.filter(s=>teamSports.some(ts=>ts.sport_id===s.id))
+    : sports;
+
+  const doLogin = async() => {
+    if(!email||!password) return setError("Συμπλήρωσε email και password");
+    setLoading(true); setError("");
+    try {
+      const session = await auth.signIn({email,password});
+      saveSession(session);
+      // Load app_user profile
+      const users = await db.get("app_users",`&auth_id=eq.${session.user.id}`);
+      _appUser = users?.[0]||null;
+      onLogin(session, _appUser);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const doRegister = async() => {
+    const needsIdFields = rRole==="athlete";
+    const rName = (rLastName.trim()+" "+rFirstName.trim()).trim();
+    if(!rFirstName||!rLastName||!rEmail||!rPassword) return setError("Συμπλήρωσε όλα τα υποχρεωτικά πεδία");
+    if(needsIdFields&&(!rIdNumber||!rDob||!rTeamId||!rSportId)) return setError("Οι αθλητές πρέπει να συμπληρώσουν όλα τα πεδία ταυτοποίησης");
+    if(rPassword!==rPassword2) return setError("Τα passwords δεν ταιριάζουν");
+    if(rPassword.length<6) return setError("Password τουλάχιστον 6 χαρακτήρες");
+    setLoading(true); setError("");
+    try {
+      // 1. Create auth user
+      const session = await auth.signUp({
+        email:rEmail, password:rPassword,
+        name:rName, id_number:rIdNumber, dob:rDob,
+        team_id:rTeamId, sport_id:rSportId, phone:rPhone
+      });
+      saveSession(session);
+
+      // 2. Get sport name
+      const sport = sports.find(s=>s.id===rSportId);
+
+      // 3. Create app_user profile
+      // Coach/Trainer start as "pending" until admin approves
+      const finalRole = (rRole==="coach"||rRole==="trainer") ? rRole+"_pending" : rRole;
+      const appUser = await db.post("app_users",{
+        auth_id: session.user.id,
+        full_name: rName,
+        email: rEmail,
+        role: finalRole,
+        id_number: rIdNumber,
+        dob: rDob,
+        team_id: rTeamId,
+        sport_id: rSportId,
+        phone: rPhone||null,
+      });
+      _appUser = appUser;
+
+      // 4. Auto-match with existing athlete profile
+      await autoMatchAthlete(session.user.id, rIdNumber, rDob, rTeamId, rName, rSportId, sport?.name);
+
+      onLogin(session, appUser);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  return html`
+    <div style=${{minHeight:"100vh",background:"#0d0f14",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style=${{width:"100%",maxWidth:460}}>
+        <!-- Logo -->
+        <div style=${{textAlign:"center",marginBottom:32}}>
+          <div style=${{width:56,height:56,background:"#4f8ef7",borderRadius:14,display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,margin:"0 auto 12px"}}>⚡</div>
+          <div style=${{fontSize:20,fontWeight:700,color:"#e8eaf0"}}>360 Ergometric Tests</div>
+          <div style=${{fontSize:12,color:"#6b7390",marginTop:4}}>Isokinetic Assessment Platform</div>
+        </div>
+
+        <!-- Card -->
+        <div style=${{background:"#13161e",border:"1px solid #252a38",borderRadius:12,padding:28}}>
+          <!-- Tabs -->
+          <div style=${{display:"flex",gap:4,marginBottom:24,background:"#1a1e28",borderRadius:8,padding:4}}>
+            ${["login","register"].map(t=>html`
+              <button key=${t} onClick=${()=>{setTab(t);setError("");}} style=${{flex:1,padding:"8px",background:tab===t?"#4f8ef7":"transparent",color:tab===t?"white":"#6b7390",border:"none",borderRadius:6,cursor:"pointer",fontWeight:tab===t?600:400,fontSize:13}}>
+                ${t==="login"?"Σύνδεση":"Εγγραφή"}
+              </button>
+            `)}
+          </div>
+
+          ${error&&html`
+            <div style=${{background:"rgba(242,95,92,0.1)",border:"1px solid #f25f5c",borderRadius:6,padding:"10px 14px",marginBottom:16,color:"#f25f5c",fontSize:12}}>
+              ⚠ ${error}
+            </div>
+          `}
+
+          ${tab==="login"?html`
+            <div>
+              <div style=${{marginBottom:12}}>
+                <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Email</div>
+                <input type="email" value=${email} onInput=${e=>setEmail(e.target.value)} placeholder="your@email.com" onKeyDown=${e=>e.key==="Enter"&&doLogin()}/>
+              </div>
+              <div style=${{marginBottom:20}}>
+                <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Password</div>
+                <input type="password" value=${password} onInput=${e=>setPassword(e.target.value)} placeholder="••••••••" onKeyDown=${e=>e.key==="Enter"&&doLogin()}/>
+              </div>
+              <button onClick=${doLogin} disabled=${loading} style=${{width:"100%",padding:"11px",background:"#4f8ef7",color:"white",border:"none",borderRadius:8,cursor:"pointer",fontWeight:600,fontSize:14,opacity:loading?0.7:1}}>
+                ${loading?"Σύνδεση...":"Σύνδεση →"}
+              </button>
+            </div>
+          `:html`
+            <div style=${{maxHeight:"60vh",overflowY:"auto",paddingRight:4}}>
+              <div style=${{fontSize:10,color:"#4f8ef7",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10}}>Στοιχεία Λογαριασμού</div>
+              <div style=${{marginBottom:12}}>
+                <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:8}}>Ιδιότητα *</div>
+                <div style=${{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+                  ${[["athlete","🏃","Αθλητής","Πρόσβαση μόνο στα δικά σου"],["coach","🎯","Προπονητής","Πρόσβαση σε ομάδα(ες)"],["trainer","💪","Γυμναστής","Πρόσβαση σε αθλητές"]].map(([r,icon,label,desc])=>html`
+                    <div key=${r} onClick=${()=>setRRole(r)}
+                      style=${{padding:"10px 8px",borderRadius:8,cursor:"pointer",textAlign:"center",
+                        background:rRole===r?(r==="athlete"?"rgba(62,207,142,0.15)":r==="coach"?"rgba(79,142,247,0.15)":"rgba(245,200,66,0.15)"):"#1a1e28",
+                        border:`1px solid ${rRole===r?(r==="athlete"?"#3ecf8e":r==="coach"?"#4f8ef7":"#f5c842"):"#252a38"}`}}>
+                      <div style=${{fontSize:20,marginBottom:4}}>${icon}</div>
+                      <div style=${{fontSize:12,fontWeight:700,color:rRole===r?(r==="athlete"?"#3ecf8e":r==="coach"?"#4f8ef7":"#f5c842"):"#e8eaf0"}}>${label}</div>
+                      <div style=${{fontSize:10,color:"#6b7390",marginTop:2}}>${desc}</div>
+                    </div>
+                  `)}
+                </div>
+                ${(rRole==="coach"||rRole==="trainer")&&html`
+                  <div style=${{marginTop:8,padding:"8px 12px",background:"rgba(245,200,66,0.08)",border:"1px solid rgba(245,200,66,0.3)",borderRadius:6,fontSize:11,color:"#f5c842"}}>
+                    ⚠ Ο λογαριασμός θα χρειαστεί έγκριση από Admin για πρόσβαση σε αθλητές.
+                  </div>
+                `}
+              </div>
+              <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+                <div>
+                  <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Επώνυμο *</div>
+                  <input value=${rLastName} onInput=${e=>setRLastName(e.target.value)} placeholder="Παπαδόπουλος"/>
+                </div>
+                <div>
+                  <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Όνομα *</div>
+                  <input value=${rFirstName} onInput=${e=>setRFirstName(e.target.value)} placeholder="Γιώργος"/>
+                </div>
+                <div>
+                  <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Email *</div>
+                  <input type="email" value=${rEmail} onInput=${e=>setREmail(e.target.value)} placeholder="your@email.com"/>
+                </div>
+                <div>
+                  <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Τηλέφωνο</div>
+                  <input value=${rPhone} onInput=${e=>setRPhone(e.target.value)} placeholder="+357 99..."/>
+                </div>
+                <div>
+                  <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Password *</div>
+                  <input type="password" value=${rPassword} onInput=${e=>setRPassword(e.target.value)} placeholder="min 6 χαρακτήρες"/>
+                </div>
+                <div>
+                  <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Επανάληψη Password *</div>
+                  <input type="password" value=${rPassword2} onInput=${e=>setRPassword2(e.target.value)} placeholder="••••••••"/>
+                </div>
+              </div>
+
+              <div style=${{fontSize:10,color:"#4f8ef7",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10}}>Στοιχεία Ταυτοποίησης</div>
+              <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+                <div>
+                  <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Αρ. Ταυτότητας *</div>
+                  <input value=${rIdNumber} onInput=${e=>setRIdNumber(e.target.value)} placeholder="ΑΒ123456"/>
+                </div>
+                <div>
+                  <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Ημ. Γέννησης *</div>
+                  <input type="date" value=${rDob} onInput=${e=>setRDob(e.target.value)}/>
+                </div>
+              </div>
+
+              <div style=${{fontSize:10,color:"#4f8ef7",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10}}>Ομάδα & Άθλημα</div>
+              <div style=${{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:20}}>
+                <div>
+                  <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Ομάδα *</div>
+                  <select value=${rTeamId} onChange=${e=>handleTeamChange(e.target.value)}>
+                    <option value="">— Επιλογή —</option>
+                    ${teams.map(t=>html`<option key=${t.id} value=${t.id}>${t.name}</option>`)}
+                  </select>
+                </div>
+                <div>
+                  <div style=${{fontSize:11,color:"#6b7390",fontWeight:600,marginBottom:4}}>Άθλημα *</div>
+                  <select value=${rSportId} onChange=${e=>setRSportId(e.target.value)} disabled=${!rTeamId}>
+                    <option value="">— Επιλογή —</option>
+                    ${filteredSports.map(s=>html`<option key=${s.id} value=${s.id}>${s.name}</option>`)}
+                  </select>
+                </div>
+              </div>
+
+              <button onClick=${doRegister} disabled=${loading} style=${{width:"100%",padding:"11px",background:"#3ecf8e",color:"#0d0f14",border:"none",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:14,opacity:loading?0.7:1}}>
+                ${loading?"Δημιουργία λογαριασμού...":"Εγγραφή →"}
+              </button>
+            </div>
+          `}
+        </div>
+        <div style=${{textAlign:"center",marginTop:16,fontSize:11,color:"#6b7390"}}>
+          360 Ergometric Tests · ergometrictests.com
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── AUTO-MATCH ATHLETE PROFILE ────────────────────────────────────────────────
+async function autoMatchAthlete(authId, idNumber, dob, teamId, name, sportId, sportName) {
+  try {
+    // Try match by id_number first (strongest signal)
+    let athletes = [];
+    if(idNumber) {
+      athletes = await db.get("athletes",`&id_number=eq.${idNumber}&status=eq.virtual`);
+    }
+    // Fallback: match by dob + team
+    if(!athletes.length && dob && teamId) {
+      athletes = await db.get("athletes",`&dob=eq.${dob}&team_id=eq.${teamId}&status=eq.virtual`);
+      // Filter by similar name
+      if(athletes.length > 1) {
+        const nameLower = name.toLowerCase();
+        athletes = athletes.filter(a=>a.name?.toLowerCase().includes(nameLower.split(" ")[0]));
+      }
+    }
+
+    if(athletes.length > 0) {
+      const athlete = athletes[0];
+      // Claim the profile
+      await db.patch("athletes", athlete.id, {
+        status: "claimed",
+        user_id: authId,
+        claimed_at: new Date().toISOString(),
+      });
+      // Log the match
+      await db.post("profile_matches",{
+        athlete_id: athlete.id,
+        match_type: idNumber ? "auto" : "auto_dob_team",
+        match_criteria: idNumber ? "id_number" : "dob+team",
+        matched_at: new Date().toISOString(),
+      });
+      // Update app_user with athlete_id
+      const users = await db.get("app_users",`&auth_id=eq.${authId}`);
+      if(users?.[0]) await db.patch("app_users",users[0].id,{athlete_id:athlete.id});
+      return athlete;
+    } else {
+      // Create new virtual athlete profile
+      const sport = sportName||"";
+      const newAthlete = await db.post("athletes",{
+        name, dob, team_id:teamId, sport_id:sportId, sport,
+        id_number:idNumber, status:"claimed",
+        user_id:authId, claimed_at:new Date().toISOString(),
+      });
+      const users = await db.get("app_users",`&auth_id=eq.${authId}`);
+      if(users?.[0]) await db.patch("app_users",users[0].id,{athlete_id:newAthlete.id});
+      return newAthlete;
+    }
+  } catch(e) { console.error("Auto-match error:", e); }
+}
+
+// ── NAVBAR WITH USER INFO ─────────────────────────────────────────────────────
+function Navbar({athlete, view, onHome, onAdmin, onLogout}) {
+  const [showMenu, setShowMenu] = useState(false);
+  const user = _appUser;
+  const isAth = user?.role==="athlete";
+
+  return html`
+    <div style=${{background:"#13161e",borderBottom:"1px solid #252a38",padding:"12px 32px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100}}>
+      <div style=${{display:"flex",alignItems:"center",gap:12,cursor:"pointer"}} onClick=${onHome}>
+        <div style=${{width:36,height:36,background:"#4f8ef7",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>⚡</div>
+        <div>
+          <div style=${{fontWeight:700,fontSize:15}}>360 Ergometric Tests</div>
+          <div style=${{fontSize:11,color:"#6b7390"}}>Isokinetic Assessment Platform</div>
+        </div>
+      </div>
+      ${athlete&&view!=="list"&&view!=="new"&&html`
+        <div style=${{fontSize:12,color:"#6b7390"}}>
+          <span style=${{cursor:"pointer",color:"#4f8ef7"}} onClick=${onHome}>Αθλητές</span>
+          ${" › "}<span style=${{color:"#e8eaf0"}}>${athlete.name}</span>
+        </div>
+      `}
+      <div style=${{display:"flex",alignItems:"center",gap:10,position:"relative"}}>
+        ${!isAth&&html`<button onClick=${onAdmin} style=${{background:"#1a1e28",color:"#6b7390",border:"1px solid #252a38",borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:12}}>⚙️ Admin</button>`}
+        <div onClick=${()=>setShowMenu(p=>!p)} style=${{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"6px 10px",background:"#1a1e28",borderRadius:8,border:"1px solid #252a38"}}>
+          <div style=${{width:28,height:28,background:"#4f8ef7",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:700,color:"white"}}>
+            ${user?.full_name?.[0]||"?"}
+          </div>
+          <div>
+            <div style=${{fontSize:12,fontWeight:600,color:"#e8eaf0"}}>${user?.full_name||"User"}</div>
+            <div style=${{fontSize:10,color:"#6b7390",textTransform:"capitalize"}}>${user?.role||"—"}</div>
+          </div>
+          <span style=${{color:"#6b7390",fontSize:10}}>▼</span>
+        </div>
+        ${showMenu&&html`
+          <div style=${{position:"absolute",top:"100%",right:0,marginTop:4,background:"#13161e",border:"1px solid #252a38",borderRadius:8,padding:8,minWidth:160,zIndex:200,boxShadow:"0 4px 20px rgba(0,0,0,0.4)"}}>
+            <div style=${{padding:"6px 12px",fontSize:11,color:"#6b7390",borderBottom:"1px solid #252a38",marginBottom:4}}>${user?.email}</div>
+            <button onClick=${()=>{setShowMenu(false);onLogout();}} style=${{width:"100%",padding:"8px 12px",background:"none",color:"#f25f5c",border:"none",borderRadius:6,cursor:"pointer",fontSize:13,textAlign:"left"}}>🚪 Αποσύνδεση</button>
+          </div>
+        `}
+
+      </div>
+    </div>`;
+}
+
+
+
+// ── ATHLETE LIST ──────────────────────────────────────────────────────────────
+function AthleteList({onSelect,onNew}){
+  const [athletes,setAthletes]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [showFilters,setShowFilters]=useState(false);
+  const [teams,setTeams]=useState(_teams);
+  const [sports,setSports]=useState(_sports);
+  // Filters
+  const [fName,setFName]=useState("");
+  const [fSurname,setFSurname]=useState("");
+  const [fIdNumber,setFIdNumber]=useState("");
+  const [fEmail,setFEmail]=useState("");
+  const [fPhone,setFPhone]=useState("");
+  const [fTeam,setFTeam]=useState("");
+  const [fSport,setFSport]=useState("");
+  const [fGender,setFGender]=useState("");
+  const [fDobFrom,setFDobFrom]=useState("");
+  const [fDobTo,setFDobTo]=useState("");
+  const [fStatus,setFStatus]=useState("");
+
+  useEffect(()=>{
+    db.get("athletes",`&order=name.asc`).then(d=>{setAthletes(d||[]);setLoading(false);}).catch(()=>setLoading(false));
+    if(!_teams.length) db.get("teams","&order=name.asc").then(d=>{setTeams(d||[]);_teams=d||[];});
+    else setTeams(_teams);
+    if(!_sports.length) db.get("sports","&order=name.asc").then(d=>{setSports(d||[]);_sports=d||[];});
+    else setSports(_sports);
+  },[]);
+
+  const clearFilters=()=>{setFName("");setFSurname("");setFIdNumber("");setFEmail("");setFPhone("");setFTeam("");setFSport("");setFGender("");setFDobFrom("");setFDobTo("");setFStatus("");};
+  const hasFilters=fName||fSurname||fIdNumber||fEmail||fPhone||fTeam||fSport||fGender||fDobFrom||fDobTo||fStatus;
+
+  const f=athletes.filter(a=>{
+    const nameParts=(a.name||"").split(" ");
+    const firstName=(nameParts[0]||"").toLowerCase();
+    const lastName=(nameParts.slice(1).join(" ")||"").toLowerCase();
+    if(fName&&!firstName.includes(fName.toLowerCase())&&!(a.name||"").toLowerCase().includes(fName.toLowerCase())) return false;
+    if(fSurname&&!lastName.includes(fSurname.toLowerCase())) return false;
+    if(fIdNumber&&!(a.id_number||"").toLowerCase().includes(fIdNumber.toLowerCase())) return false;
+    if(fTeam&&a.team_id!==fTeam) return false;
+    if(fSport&&a.sport_id!==fSport) return false;
+    if(fGender&&a.gender!==fGender) return false;
+    if(fStatus&&a.status!==fStatus) return false;
+    if(fDobFrom&&a.dob&&a.dob<fDobFrom) return false;
+    if(fDobTo&&a.dob&&a.dob>fDobTo) return false;
+    return true;
+  });
+
+  return html`
+    <div>
+      <div style=${{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div>
+          <div style=${{fontSize:11,color:C.accent,fontWeight:600,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>Βάση Δεδομένων</div>
+          <div style=${{fontSize:22,fontWeight:700}}>Αθλητές <span style=${{fontSize:14,color:C.muted,fontWeight:400}}>(${f.length}/${athletes.length})</span></div>
+        </div>
+        <div style=${{display:"flex",gap:8}}>
+          <button onClick=${()=>setShowFilters(p=>!p)} style=${{padding:"8px 14px",background:showFilters?C.accent:C.bg3,color:showFilters?"white":C.muted,border:`1px solid ${showFilters?C.accent:C.border}`,borderRadius:6,cursor:"pointer",fontSize:12,display:"flex",alignItems:"center",gap:6}}>
+            🔍 Φίλτρα ${hasFilters?html`<span style=${{background:"rgba(255,255,255,0.2)",borderRadius:10,padding:"0 6px",fontSize:10}}>ON</span>`:""}
+          </button>
+          <${Btn} onClick=${onNew}>+ Νέος Αθλητής<//>
+        </div>
+      </div>
+
+      ${showFilters&&html`
+        <${Card} style=${{marginBottom:16,background:C.bg3}}>
+          <div style=${{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <${Sec} t="Φίλτρα Αναζήτησης"/>
+            ${hasFilters&&html`<button onClick=${clearFilters} style=${{background:"rgba(242,95,92,0.1)",color:C.red,border:"none",borderRadius:4,padding:"4px 10px",cursor:"pointer",fontSize:11}}>✕ Καθαρισμός</button>`}
+          </div>
+          <div style=${{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+            <div>
+              <${Lbl} t="Όνομα"/>
+              <input value=${fName} onInput=${e=>setFName(e.target.value)} placeholder="π.χ. Γιώργος"/>
+            </div>
+            <div>
+              <${Lbl} t="Επώνυμο"/>
+              <input value=${fSurname} onInput=${e=>setFSurname(e.target.value)} placeholder="π.χ. Παπαδόπουλος"/>
+            </div>
+            <div>
+              <${Lbl} t="Αρ. Ταυτότητας"/>
+              <input value=${fIdNumber} onInput=${e=>setFIdNumber(e.target.value)} placeholder="π.χ. ΑΒ123456"/>
+            </div>
+            <div>
+              <${Lbl} t="Φύλο"/>
+              <select value=${fGender} onChange=${e=>setFGender(e.target.value)}>
+                <option value="">Όλα</option>
+                <option value="male">Άνδρας</option>
+                <option value="female">Γυναίκα</option>
+              </select>
+            </div>
+            <div>
+              <${Lbl} t="Ομάδα"/>
+              <select value=${fTeam} onChange=${e=>setFTeam(e.target.value)}>
+                <option value="">Όλες</option>
+                ${teams.map(t=>html`<option key=${t.id} value=${t.id}>${t.name}</option>`)}
+              </select>
+            </div>
+            <div>
+              <${Lbl} t="Άθλημα"/>
+              <select value=${fSport} onChange=${e=>setFSport(e.target.value)}>
+                <option value="">Όλα</option>
+                ${sports.map(s=>html`<option key=${s.id} value=${s.id}>${s.name}</option>`)}
+              </select>
+            </div>
+            <div>
+              <${Lbl} t="Κατάσταση"/>
+              <select value=${fStatus} onChange=${e=>setFStatus(e.target.value)}>
+                <option value="">Όλες</option>
+                <option value="virtual">Virtual</option>
+                <option value="claimed">Claimed</option>
+              </select>
+            </div>
+            <div>
+              <${Lbl} t="Ημ. Γέννησης Από"/>
+              <input type="date" value=${fDobFrom} onInput=${e=>setFDobFrom(e.target.value)}/>
+            </div>
+            <div>
+              <${Lbl} t="Ημ. Γέννησης Έως"/>
+              <input type="date" value=${fDobTo} onInput=${e=>setFDobTo(e.target.value)}/>
+            </div>
+          </div>
+        <//>
+      `}
+
+      ${loading?html`<div style=${{textAlign:"center",padding:40}}><${Sp}/></div>`:f.length===0?html`
+        <${Card} style=${{textAlign:"center",padding:40,color:C.muted}}>
+          <div style=${{fontSize:32,marginBottom:12}}>👤</div>
+          <div>${hasFilters?"Δεν βρέθηκαν αθλητές με αυτά τα φίλτρα.":"Δεν υπάρχουν αθλητές."}</div>
+          ${hasFilters&&html`<button onClick=${clearFilters} style=${{marginTop:12,padding:"6px 16px",background:C.bg3,color:C.muted,border:`1px solid ${C.border}`,borderRadius:6,cursor:"pointer",fontSize:12}}>Καθαρισμός φίλτρων</button>`}
+        <//>
+      `:html`
+        <${Card} style=${{padding:0}}>
+          <div style=${{overflowX:"auto"}}>
+            <table><thead><tr>
+              <th>Όνομα</th><th>Ηλικία</th><th>Φύλο</th><th>Ομάδα</th><th>Άθλημα</th><th>ID</th><th>Βάρος</th><th>Status</th><th></th>
+            </tr></thead>
+            <tbody>${f.map(a=>html`
+              <tr key=${a.id} style=${{cursor:"pointer"}} onClick=${()=>onSelect(a)}>
+                <td style=${{fontWeight:600}}>${a.name}</td>
+                <td class="muted">${a.dob?age(a.dob)+" ετών":"—"}</td>
+                <td class="muted">${a.gender==="male"?"Άνδρας":a.gender==="female"?"Γυναίκα":"—"}</td>
+                <td class="muted" style=${{fontSize:11}}>${_teams.find(t=>t.id===a.team_id)?.name||"—"}</td>
+                <td class="muted">${a.sport||"—"}</td>
+                <td class="muted" style=${{fontSize:11}}>${a.id_number||"—"}</td>
+                <td class="muted">${a.weight_kg?a.weight_kg+"kg":"—"}</td>
+                <td>${a.status==="claimed"?html`<${Bdg} txt="✓ Claimed" color="green"/>`:html`<${Bdg} txt="Virtual" color="muted"/>`}</td>
+                <td style=${{color:C.accent,fontSize:18}}>›</td>
+              </tr>
+            `)}</tbody></table>
+          </div>
+        <//>
+      `}
+    </div>`;
+}
+
+// ── ATHLETE PROFILE ───────────────────────────────────────────────────────────
+function AthleteProfile({athlete,onBack,onNewMeasurement,onNewMultiSpeed,onEdit,showToast,readOnly=false}){
+  const [measurements,setMeasurements]=useState([]);
+  const [selected,setSelected]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [tab,setTab]=useState("history");
+  const [deleting,setDeleting]=useState(null);
+
+  const load=useCallback(async()=>{
+    setLoading(true);
+    try{const data=await db.get("measurements",`,test_results(*)&athlete_id=eq.${athlete.id}&order=test_date.desc`);setMeasurements(data||[]);}
+    catch(e){console.error(e);}
+    setLoading(false);
+  },[athlete.id]);
+
+  useEffect(()=>{load();},[load]);
+  const toggle=(id)=>setSelected(s=>s.includes(id)?s.filter(x=>x!==id):[...s,id].slice(-2));
+
+  const deleteMeas=async(m)=>{
+    if(!confirm(`Διαγραφή μέτρησης ${m.test_date};`))return;
+    setDeleting(m.id);
+    try{await db.del("measurements",m.id);setMeasurements(ms=>ms.filter(x=>x.id!==m.id));setSelected(s=>s.filter(x=>x!==m.id));showToast("Μέτρηση διαγράφηκε");}
+    catch(e){showToast(e.message,"error");}
+    setDeleting(null);
+  };
+
+  const a=age(athlete.dob);
+  const tabs=[["history","Ιστορικό"],["analysis","Ανάλυση"],["clinical","✍️ Οδηγίες"],["trends","📈 Εξέλιξη"],["compare","Σύγκριση"],["multispeed","⚡ Multi-Speed"]];
+
+  return html`
+    <div>
+      <div style=${{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
+        <div>
+          <button onClick=${onBack} style=${{background:"none",color:C.muted,fontSize:12,padding:"4px 0",marginBottom:8,border:"none",cursor:"pointer"}}>← Πίσω</button>
+          <div style=${{fontSize:22,fontWeight:700}}>${athlete.name}</div>
+          <div style=${{color:C.muted,fontSize:13,marginTop:2}}>${[a&&a+" ετών",athlete.gender==="male"?"Άνδρας":athlete.gender==="female"?"Γυναίκα":null,athlete.weight_kg&&athlete.weight_kg+"kg",athlete.height_cm&&athlete.height_cm+"cm",athlete.sport].filter(Boolean).join(" · ")}</div>
+          ${athlete.notes&&html`<div style=${{fontSize:12,color:C.muted,marginTop:4,fontStyle:"italic"}}>${athlete.notes}</div>`}
+        </div>
+        <div style=${{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
+          <${Btn} onClick=${()=>exportExcel(athlete,measurements)} color=${C.bg3} textColor=${C.muted} style=${{fontSize:12}}>📊 Export Excel<//>
+          ${!readOnly&&html`
+            <${Btn} onClick=${onEdit} color=${C.bg3} textColor=${C.muted} style=${{fontSize:12}}>✏️ Επεξεργασία<//>
+            <${Btn} onClick=${onNewMeasurement}>+ Νέα Μέτρηση<//>
+            <${Btn} onClick=${onNewMultiSpeed} color=${"#1a5c3a"} style=${{fontSize:12}}>⚡ Multi-Speed<//>
+          `}
+        </div>
+      </div>
+
+      <div style=${{display:"flex",gap:4,marginBottom:20,borderBottom:`1px solid ${C.border}`}}>
+        ${tabs.map(([v,l])=>html`<button key=${v} onClick=${()=>setTab(v)} style=${{padding:"8px 18px",background:"none",color:tab===v?C.accent:C.muted,borderBottom:tab===v?`2px solid ${C.accent}`:"2px solid transparent",border:"none",borderRadius:0,cursor:"pointer",fontWeight:tab===v?600:400}}>${l}</button>`)}
+      </div>
+
+      ${loading?html`<div style=${{textAlign:"center",padding:40}}><${Sp}/></div>`:html`
+        ${tab==="history"&&html`
+          <div>
+            ${selected.length>0&&html`<div style=${{background:"rgba(79,142,247,0.08)",border:`1px solid ${C.accent}`,borderRadius:8,padding:"10px 16px",marginBottom:16,fontSize:12,color:C.accent}}>${selected.length===1?"1 μέτρηση επιλεγμένη — πάτα Ανάλυση":"2 μετρήσεις — πάτα Σύγκριση"}</div>`}
+            ${measurements.length===0?html`<${Card} style=${{textAlign:"center",padding:40,color:C.muted}}><div style=${{fontSize:32,marginBottom:12}}>📊</div><div>Δεν υπάρχουν μετρήσεις.</div><//>`:html`
+              <${Card} style=${{padding:0}}>
+                <div style=${{overflowX:"auto"}}>
+                  <table><thead><tr><th></th><th>Ημερομηνία</th><th>Άρθρωση</th><th>Πρωτόκολλο</th><th>°/s</th><th>Gravity</th><th>Πηγή</th><th>Σημειώσεις</th><th></th></tr></thead>
+                  <tbody>${measurements.map(m=>html`
+                    <tr key=${m.id}>
+                      <td><input type="checkbox" checked=${selected.includes(m.id)} onChange=${()=>toggle(m.id)} style=${{width:"auto"}}/></td>
+                      <td style=${{fontWeight:600}}>${m.test_date}</td>
+                      <td style=${{textTransform:"capitalize"}}>${m.joint}</td>
+                      <td><${Bdg} txt=${m.protocol} color="muted"/></td>
+                      <td class="mono muted">${m.speed_deg_s}</td>
+                      <td>${m.gravity_corrected?html`<span class="green">✓</span>`:html`<span class="red">✗</span>`}</td>
+                      <td class="muted" style=${{fontSize:11}}>${m.source==="pdf_upload"?"PDF":"Manual"}</td>
+                      <td class="muted" style=${{fontSize:11}}>${m.notes||"—"}</td>
+                      <td style=${{whiteSpace:"nowrap"}}>
+                        <button onClick=${()=>{setSelected([m.id]);setTab("analysis");}} style=${{background:C.bg3,color:C.accent,padding:"4px 10px",fontSize:11,border:"none",borderRadius:4,cursor:"pointer",marginRight:4}}>Ανάλυση</button>
+                        <button onClick=${()=>deleteMeas(m)} disabled=${deleting===m.id} style=${{background:"rgba(242,95,92,0.1)",color:C.red,padding:"4px 10px",fontSize:11,border:"none",borderRadius:4,cursor:"pointer"}}>${deleting===m.id?html`<${Sp}/>`:""} 🗑</button>
+                      </td>
+                    </tr>
+                  `)}</tbody></table>
+                </div>
+              <//>
+            `}
+          </div>
+        `}
+        ${tab==="analysis"&&html`<${AnalysisView} measurements=${measurements} selected=${selected} athlete=${athlete}/>`}
+        ${tab==="clinical"&&html`
+          <div>
+            ${measurements.length===0?html`<${Card} style=${{textAlign:"center",padding:40,color:C.muted}}><div>Δεν υπάρχουν μετρήσεις.</div><//>`:html`
+              <div style=${{marginBottom:16}}>
+                <${Lbl} t="Επιλογή Μέτρησης"/>
+                <select value=${selected[0]||measurements[0]?.id||""} onChange=${e=>setSelected([e.target.value])}>
+                  ${measurements.map(m=>html`<option key=${m.id} value=${m.id}>${m.test_date} — ${m.joint} ${m.speed_deg_s}°/s ${m.notes?"("+m.notes+")":""}</option>`)}
+                </select>
+              </div>
+              <${ClinicalNotesEditor}
+                meas=${measurements.find(m=>m.id===(selected[0]||measurements[0]?.id))||measurements[0]}
+                athlete=${athlete}
+                an=${analyze((measurements.find(m=>m.id===(selected[0]||measurements[0]?.id))||measurements[0])?.test_results||[], athlete?.gender||"")}
+                showToast=${showToast}
+                onSaved=${(updated)=>setMeasurements(ms=>ms.map(m=>m.id===updated.id?{...m,...updated}:m))}
+              />
+            `}
+          </div>
+        `}
+        ${tab==="trends"&&html`<${TrendCharts} measurements=${measurements}/>`}
+        ${tab==="compare"&&html`<${CompareView} measurements=${measurements}/>`}
+        ${tab==="multispeed"&&html`<${MultiSpeedAnalysis} measurements=${measurements} athlete=${athlete}/>`}
+      `}
+    </div>`;
+}
+
+// ── APP ───────────────────────────────────────────────────────────────────────
+function App(){
+  const [view,setView]=useState("list");
+  const [athlete,setAthlete]=useState(null);
+  const [toast,setToast]=useState(null);
+  const [showAdmin,setShowAdmin]=useState(false);
+  const [session,setSession]=useState(_session);
+  const [appUser,setAppUser]=useState(_appUser);
+  const [authLoading,setAuthLoading]=useState(!!_session);
+
+  // Verify session on mount
+  useEffect(()=>{
+    if(_session?.access_token){
+      auth.getUser(_session.access_token).then(async u=>{
+        if(!u){
+          // Try refresh token
+          if(_session?.refresh_token){
+            try {
+              const newSession = await auth.refreshToken(_session.refresh_token);
+              saveSession(newSession);
+              _session = newSession;
+              setSession(newSession);
+              const users = await db.get("app_users",`&auth_id=eq.${newSession.user?.id}`);
+              _appUser = users?.[0]||null;
+              setAppUser(_appUser);
+            } catch(e) {
+              saveSession(null);setSession(null);setAppUser(null);
+            }
+          } else {
+            saveSession(null);setSession(null);setAppUser(null);
+          }
+        } else {
+          if(!_appUser){
+            const users = await db.get("app_users",`&auth_id=eq.${_session.user?.id||u.id}`);
+            _appUser = users?.[0]||null;
+            setAppUser(_appUser);
+          }
+        }
+        setAuthLoading(false);
+      }).catch(()=>{ saveSession(null);setSession(null);setAppUser(null);setAuthLoading(false); });
+    } else setAuthLoading(false);
+  },[]);
+
+  const handleLogin=(session,appUser)=>{
+    setSession(session);setAppUser(appUser);
+    // If athlete role, go directly to their profile
+    if(appUser?.athlete_id){
+      db.get("athletes",`&id=eq.${appUser.athlete_id}`,",test_results(*)").then(d=>{
+        if(d?.[0]){setAthlete(d[0]);setView("profile");}
+      });
+    }
+  };
+
+  const handleLogout=async()=>{
+    if(_session?.access_token) await auth.signOut(_session.access_token);
+    saveSession(null); _appUser=null; _session=null;
+    setSession(null);setAppUser(null);setView("list");setAthlete(null);
+  };
+
+  const showToast=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),3500);};
+  const isAthlete = appUser?.role==="athlete";
+  const isPending = appUser?.role?.includes("_pending");
+
+  if(authLoading) return html`<div style=${{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",color:C.muted}}><${Sp}/></div>`;
+  if(!session) return html`<${LoginPage} onLogin=${handleLogin}/>`;
+  if(isPending) return html`
+    <div style=${{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style=${{textAlign:"center",maxWidth:400,padding:32}}>
+        <div style=${{fontSize:48,marginBottom:16}}>⏳</div>
+        <div style=${{fontSize:20,fontWeight:700,color:C.text,marginBottom:8}}>Αναμονή Έγκρισης</div>
+        <div style=${{fontSize:13,color:C.muted,marginBottom:24}}>Ο λογαριασμός σου (${appUser?.role?.replace("_pending","")}) είναι υπό έγκριση από τον Admin. Θα ειδοποιηθείς μόλις εγκριθεί.</div>
+        <button onClick=${handleLogout} style=${{padding:"10px 24px",background:C.bg3,color:C.muted,border:`1px solid ${C.border}`,borderRadius:8,cursor:"pointer"}}>Αποσύνδεση</button>
+      </div>
+    </div>`;
+
+  return html`
+    <div style=${{minHeight:"100vh",background:C.bg}}>
+      <${Navbar} athlete=${athlete} view=${view} onHome=${()=>{if(!isAthlete)setView("list");}} onAdmin=${()=>setShowAdmin(true)} onLogout=${handleLogout}/>
+      <div style=${{maxWidth:1150,margin:"0 auto",padding:"28px 32px"}}>
+        ${!isAthlete&&html`
+          ${view==="list"&&html`<${AthleteList} onSelect=${a=>{setAthlete(a);setView("profile");}} onNew=${()=>setView("new")}/>`}
+          ${view==="new"&&html`<${AthleteForm} onSave=${a=>{setAthlete(a);showToast("Αθλητής αποθηκεύτηκε");setView("profile");}} onCancel=${()=>setView("list")}/>`}
+          ${view==="edit"&&athlete&&html`<${AthleteForm} athlete=${athlete} onSave=${a=>{setAthlete(a);showToast("Στοιχεία ενημερώθηκαν");setView("profile");}} onCancel=${()=>setView("profile")}/>`}
+        `}
+        ${view==="profile"&&athlete&&html`<${AthleteProfile} athlete=${athlete} onBack=${()=>isAthlete?null:setView("list")} onNewMeasurement=${()=>setView("meas")} onNewMultiSpeed=${()=>setView("multispeed")} onEdit=${()=>setView("edit")} showToast=${showToast} readOnly=${isAthlete}/>`}
+        ${!isAthlete&&html`
+          ${view==="meas"&&athlete&&html`<${MeasurementInput} athlete=${athlete} onSave=${()=>{showToast("Μέτρηση αποθηκεύτηκε");setView("profile");}} onCancel=${()=>setView("profile")}/>`}
+          ${view==="multispeed"&&athlete&&html`<${MultiSpeedInput} athlete=${athlete} onSave=${()=>{showToast("Session αποθηκεύτηκε ✅");setView("profile");}} onCancel=${()=>setView("profile")}/>`}
+        `}
+      </div>
+      <${Toast} msg=${toast?.msg} type=${toast?.type}/>
+      ${showAdmin&&html`<${AdminPanel} onClose=${()=>setShowAdmin(false)} showToast=${showToast}/>`}
+    </div>`;
+}
+
+render(h(App,null),document.getElementById("root"));
+  </script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0d0f14;color:#e8eaf0;font-family:Inter,sans-serif;font-size:14px}
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+    input,select,textarea{background:#1a1e28;border:1px solid #252a38;color:#e8eaf0;border-radius:6px;padding:8px 12px;font-size:13px;font-family:Inter,sans-serif;width:100%;outline:none;box-sizing:border-box}
+    input:focus,select:focus,textarea:focus{border-color:#4f8ef7}
+    table{width:100%;border-collapse:collapse}
+    th{font-size:10px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#6b7390;padding:7px 10px;text-align:left;border-bottom:1px solid #252a38}
+    td{padding:8px 10px;font-size:13px;border-bottom:1px solid rgba(37,42,56,0.5)}
+    tr:last-child td{border-bottom:none}
+    tr:hover td{background:rgba(79,142,247,0.04)}
+    .mono{font-family:'JetBrains Mono',monospace}
+    .green{color:#3ecf8e}.yellow{color:#f5c842}.red{color:#f25f5c}.muted{color:#6b7390}.accent{color:#4f8ef7}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @media print{body{background:white;color:black}}
+  </style>
+</head>
+<body>
+<div id="root"><div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#6b7390;font-family:Inter,sans-serif">Φόρτωση...</div></div>
+</body>
+</html>
